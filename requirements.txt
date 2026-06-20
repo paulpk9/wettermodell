@@ -4,3 +4,4 @@ numpy
 PyGithub
 pytz
 scipy
+geopandas
