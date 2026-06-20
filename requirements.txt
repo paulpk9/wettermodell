@@ -1,0 +1,6 @@
+streamlit
+matplotlib
+numpy
+PyGithub
+pytz
+scipy
