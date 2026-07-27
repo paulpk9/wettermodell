@@ -62,23 +62,23 @@
     "Niederschlagsrate (mm/h)": [
         {
             "value": 0.0,
-            "color": "#000000"
+            "color": "#3d3d3d"
         },
         {
             "value": 0.5,
-            "color": "#9dd2ff"
+            "color": "#78c1ff"
         },
         {
             "value": 1.0,
-            "color": "#00bfff"
+            "color": "#008cff"
         },
         {
             "value": 2.0,
-            "color": "#0079ff"
+            "color": "#0044ff"
         },
         {
             "value": 5.0,
-            "color": "#0004ff"
+            "color": "#0009b6"
         },
         {
             "value": 10.0,
@@ -103,6 +103,10 @@
         {
             "value": 50.0,
             "color": "#e50000"
+        },
+        {
+            "value": 0.1,
+            "color": "#cdedff"
         }
     ]
 }
