@@ -1,44 +1,54 @@
 import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
 
-st.set_page_config(
-    page_title="Regionale Wetter-KI & Modellkarten",
-    page_icon="🗺️",
-    layout="wide"
-)
+# Seiten-Layout
+st.set_page_config(page_title="Modellkarten-Generator", page_icon="🗺️", layout="wide")
 
-st.title("🗺️ Regionale Wetter-Zentrale & Modellkarten")
-st.write("Hier siehst du die Modellkarten-Ansicht ähnlich wie bei großen Wetterportalen – angepasst auf deine Region.")
+st.title("🗺️ Statische Modellkarte (Prototyp)")
+st.write("Hier testen wir die Zeichen-Logik der Modellkarte. Es werden fiktive Daten generiert, die wie ein echtes Temperatur-Raster aussehen.")
 
-# Sidebar für die Steuerung
-st.sidebar.header("⚙️ Modell-Steuerung")
-region = st.sidebar.selectbox(
-    "Region wählen:",
-    ["Deutschland", "Mitteldeutschland", "Brandenburg (Elbe-Elster)"]
-)
+# Funktion: Generiert das Bild
+def create_dummy_map():
+    # 1. Wir definieren das Gitter für Deutschland
+    # Längengrad (West-Ost): ca. 5.8 bis 15.0
+    # Breitengrad (Süd-Nord): ca. 47.2 bis 55.0
+    lons = np.linspace(5.8, 15.0, 100)
+    lats = np.linspace(47.2, 55.0, 100)
+    
+    # Raster erzeugen (wie ein Koordinatensystem)
+    Lons, Lats = np.meshgrid(lons, lats)
+    
+    # 2. Fiktive Wetterdaten erzeugen (Temperatur)
+    # Basis 25 Grad, nach Norden kühler, plus ein paar "Wellen" (Sinus) für die Optik
+    Temp = 25 - (Lats - 47.2) * 1.8 + np.sin(Lons * 3) * 2 
 
-parameter = st.sidebar.selectbox(
-    "Meteorologischer Parameter:",
-    ["Temperatur (2m)", "Niederschlag / Radar", "Windböen"]
-)
+    # 3. Die Karte zeichnen (Matplotlib)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # contourf zeichnet die eingefärbten Flächen (die klassische Modellkarten-Optik)
+    # cmap='coolwarm' ist die Farbskala von Blau (kalt) zu Rot (warm)
+    karte = ax.contourf(Lons, Lats, Temp, levels=20, cmap='coolwarm')
+    
+    # Eine Farbskala an der Seite hinzufügen
+    cbar = fig.colorbar(karte, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Temperatur in °C')
+    
+    # Achsen anpassen
+    ax.set_title("Fiktives Temperatur-Modell (Deutschland-Ausschnitt)")
+    ax.set_xlabel("Längengrad (Ost)")
+    ax.set_ylabel("Breitengrad (Nord)")
+    
+    # Das fertige Bild zurückgeben
+    return fig
 
-st.sidebar.divider()
-st.sidebar.info("Modell-Basis: DWD ICON / Open Data")
-
-# Hauptbereich: Anzeige der "Modellkarte"
-st.subheader(f"Modellkarte: {parameter} für {region}")
-
-# Platzhalter für die Karte (hier binden wir später die echten Daten oder gerenderten GRIB2-Plots ein)
-if parameter == "Temperatur (2m)":
-    st.success("Lade Temperatur-Gitterdaten...")
-    # Hier könnte später deine gerenderte Karte stehen
-    st.image("https://images.unsplash.com/photo-1592210454359-9043f067919b?auto=format&fit=crop&w=1000&q=80", 
-             caption=f"Beispiel-Ansicht: Temperaturmodell für {region}")
-
-elif parameter == "Niederschlag / Radar":
-    st.warning("Verknüpfe Regenradar-Echtzeitdaten...")
-    st.image("https://images.unsplash.com/photo-1534274988757-a28bf1a57c17?auto=format&fit=crop&w=1000&q=80", 
-             caption=f"Beispiel-Ansicht: Niederschlag/Radar für {region}")
-
-else:
-    st.info("Lade Winddaten...")
-    st.markdown("*(Hier erscheint demnächst die Wind-Modellkarte)*")
+# Der Auslöser auf der Webseite
+if st.button("Wetterkarte jetzt rendern"):
+    with st.spinner("Berechne mathematisches Gitter und zeichne Karte..."):
+        # Funktion aufrufen
+        fertige_grafik = create_dummy_map()
+        
+        # Die fertige Grafik in Streamlit anzeigen
+        st.pyplot(fertige_grafik)
+        
+        st.success("Erfolgreich generiert! Genauso funktioniert es später auch mit den echten GRIB2-Daten.")
