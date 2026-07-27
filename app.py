@@ -15,22 +15,34 @@ import xarray as xr
 
 # --- SEITEN-LAYOUT ---
 st.set_page_config(page_title="Modellkarten-Generator", page_icon="🗺️", layout="wide")
-st.title("🗺️ Statische Modellkarte (Echte DWD-Daten)")
+st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
 
-# --- STANDARD-KONFIGURATION ---
-DEFAULT_CONFIG = [
-    {"value": -10.0, "color": "#313695"},
-    {"value": 0.0, "color": "#74add1"},
-    {"value": 10.0, "color": "#e0f3f8"},
-    {"value": 20.0, "color": "#fdae61"},
-    {"value": 30.0, "color": "#d73027"},
-    {"value": 40.0, "color": "#a50026"}
-]
+# --- STANDARD-KONFIGURATION (Jetzt für jeden Parameter einzeln) ---
+DEFAULT_CONFIGS = {
+    "Temperatur (2m)": [
+        {"value": -10.0, "color": "#313695"},
+        {"value": 0.0, "color": "#74add1"},
+        {"value": 15.0, "color": "#fdae61"},
+        {"value": 30.0, "color": "#d73027"}
+    ],
+    "Akk. Niederschlag (mm)": [
+        {"value": 0.0, "color": "#ffffff"},  # Weiß für trocken
+        {"value": 1.0, "color": "#a6cee3"},  # Leichtes Blau
+        {"value": 10.0, "color": "#1f78b4"}, # Dunkles Blau
+        {"value": 30.0, "color": "#33a02c"}  # Grün (Starkregen)
+    ],
+    "Niederschlagsrate (mm/h)": [
+        {"value": 0.0, "color": "#ffffff"},
+        {"value": 0.5, "color": "#a6cee3"},
+        {"value": 2.0, "color": "#1f78b4"},
+        {"value": 10.0, "color": "#33a02c"},
+        {"value": 25.0, "color": "#fb9a99"}  # Rot (Gewitterschauer)
+    ]
+}
 
 # --- GITHUB LADE- & SPEICHER-FUNKTIONEN ---
 def get_github_client():
     if "GITHUB_TOKEN" in st.secrets:
-        # Korrigierte Authentifizierungsmethode laut neuer PyGithub Version
         auth = Auth.Token(st.secrets["GITHUB_TOKEN"])
         return Github(auth=auth)
     return None
@@ -41,10 +53,14 @@ def load_config():
         try:
             repo = g.get_repo(st.secrets["GITHUB_REPO"])
             file = repo.get_contents("config.json")
-            return json.loads(file.decoded_content.decode())
+            loaded_data = json.loads(file.decoded_content.decode())
+            # Rückwärtskompatibilität: Falls es noch die alte Liste ist, packe sie in Temperatur
+            if isinstance(loaded_data, list):
+                return {"Temperatur (2m)": loaded_data, "Akk. Niederschlag (mm)": DEFAULT_CONFIGS["Akk. Niederschlag (mm)"], "Niederschlagsrate (mm/h)": DEFAULT_CONFIGS["Niederschlagsrate (mm/h)"]}
+            return loaded_data
         except Exception:
             pass
-    return DEFAULT_CONFIG
+    return DEFAULT_CONFIGS
 
 def save_config(config_data):
     g = get_github_client()
@@ -55,29 +71,25 @@ def save_config(config_data):
             content = json.dumps(config_data, indent=4)
             try:
                 file = repo.get_contents(file_path)
-                repo.update_file(file_path, "Update Farbskala", content, file.sha)
+                repo.update_file(file_path, "Update Farbskalen", content, file.sha)
             except:
                 repo.create_file(file_path, "Create config.json", content)
             st.success("Erfolgreich auf GitHub gespeichert!")
         except Exception as e:
             st.error(f"Fehler beim Speichern: {e}")
-    else:
-        st.error("GitHub Secrets fehlen zum Speichern.")
 
 if "config" not in st.session_state:
     st.session_state.config = load_config()
 
-# --- DATEN LADEN (Grenzen) mit Anti-Absturz-Fix ---
+# --- DATEN LADEN (Grenzen) ---
 @st.cache_data
 def load_borders():
-    # Wir nutzen requests, um den GDAL/curl Segmentation Fault zu umgehen
     world_url = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson"
     bl_url = "https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/main/2_bundeslaender/4_niedrig.geo.json"
     
     world_resp = requests.get(world_url).text
     bl_resp = requests.get(bl_url).text
     
-    # Kurzzeitig als lokale Dateien speichern für geopandas
     with tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f1:
         f1.write(world_resp)
         f1_name = f1.name
@@ -87,71 +99,93 @@ def load_borders():
         
     world = gpd.read_file(f1_name)
     bundeslaender = gpd.read_file(f2_name)
-    
     os.remove(f1_name)
     os.remove(f2_name)
-    
     return world, bundeslaender
 
-# --- DWD ZEITEN FINDEN & LADE-FUNKTION ---
-@st.cache_data(ttl=3600) # Cacht den neuesten Lauf für eine Stunde
-def get_latest_run_time():
+# --- MODELLLÄUFE BERECHNEN ---
+def get_available_runs():
     now = datetime.now(timezone.utc)
-    for offset in range(4):
-        run_time = now - timedelta(hours=(now.hour % 3) + offset * 3)
-        run_str = f"{run_time.hour:02d}"
-        date_str = run_time.strftime("%Y%m%d")
-        # Wir testen nur, ob Stunde 000 existiert
-        url = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/t_2m/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_000_2d_t_2m.grib2.bz2"
-        try:
-            resp = requests.head(url, timeout=5)
-            if resp.status_code == 200:
-                return run_time
-        except Exception:
-            continue
-    return None
+    latest_run_hour = (now.hour // 3) * 3
+    latest_run = now.replace(hour=latest_run_hour, minute=0, second=0, microsecond=0)
+    
+    runs = {}
+    for i in range(8): # Letzte 24 Stunden (8 Läufe a 3h)
+        r = latest_run - timedelta(hours=i*3)
+        label = f"{r.strftime('%d.%m.%Y')} | {r.hour:02d}Z (UTC)"
+        runs[label] = r
+    return runs
 
-def get_icon_data(run_time, forecast_hour):
+# --- DWD GRIB2 DOWNLOAD-FUNKTION ---
+@st.cache_data(ttl=3600)
+def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
     run_str = f"{run_time.hour:02d}"
     date_str = run_time.strftime("%Y%m%d")
     hour_str = f"{forecast_hour:03d}"
     
-    file_name = f"icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_2d_t_2m.grib2.bz2"
-    url = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/t_2m/{file_name}"
+    file_name = f"icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{suffix}.grib2.bz2"
+    url = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{folder}/{file_name}"
     
     try:
         dl_resp = requests.get(url)
         if dl_resp.status_code != 200:
-            st.error("Diese Vorhersagestunde ist auf dem Server (noch) nicht verfügbar.")
             return None, None, None
             
         grib_data = bz2.decompress(dl_resp.content)
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f:
             f.write(grib_data)
             temp_path = f.name
         
         ds = xr.open_dataset(temp_path, engine='cfgrib')
-        temp_c = ds['t2m'].values - 273.15
+        vals = ds[var_name].values
         lats = ds['latitude'].values
         lons = ds['longitude'].values
         
         ds.close()
         os.remove(temp_path)
-        return lons, lats, temp_c
-    except Exception as e:
-        st.error(f"Fehler beim Laden der GRIB2-Daten: {e}")
+        return lons, lats, vals
+    except Exception:
         return None, None, None
 
+# --- PARAMETER-LOGIK (Die Meteorologische Aufbereitung) ---
+def load_parameter_data(run_time, forecast_hour, param_name):
+    if param_name == "Temperatur (2m)":
+        lons, lats, vals = get_raw_grib(run_time, forecast_hour, "t_2m", "2d_t_2m", "t2m")
+        if vals is not None: vals = vals - 273.15 # Kelvin in Celsius
+        return lons, lats, vals, "Temperatur in °C"
+        
+    elif param_name == "Akk. Niederschlag (mm)":
+        lons, lats, vals = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
+        return lons, lats, vals, "Niederschlag in mm"
+        
+    elif param_name == "Niederschlagsrate (mm/h)":
+        if forecast_hour == 0:
+            lons, lats, vals = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
+            if vals is not None: vals = np.zeros_like(vals) # Stunde 0 = 0mm/h
+            return lons, lats, vals, "Regenrate in mm/h"
+        else:
+            # Trick: Stunde H minus Stunde H-1 rechnen
+            lons, lats, vals_h = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
+            _, _, vals_h1 = get_raw_grib(run_time, forecast_hour - 1, "tot_prec", "2d_tot_prec", "tp")
+            if vals_h is not None and vals_h1 is not None:
+                rate = vals_h - vals_h1
+                rate = np.clip(rate, 0, None) # Minuswerte durch Rundungsfehler verhindern
+                return lons, lats, rate, "Regenrate in mm/h"
+    
+    return None, None, None, ""
+
 # --- KARTE ZEICHNEN ---
-def create_map(config_data, lons, lats, temp_data, map_title_time):
+def create_map(config_list, lons, lats, data, map_title_time, legend_title):
     world, bundeslaender = load_borders()
     
-    sorted_conf = sorted(config_data, key=lambda x: x['value'])
+    sorted_conf = sorted(config_list, key=lambda x: x['value'])
     levels = [c['value'] for c in sorted_conf]
     colors = [c['color'] for c in sorted_conf]
     
     min_val, max_val = min(levels), max(levels)
+    # Verhindere Division durch Null, falls alle Werte gleich sind
+    if max_val == min_val: max_val = min_val + 1 
+    
     norm_levels = [(v - min_val) / (max_val - min_val) for v in levels]
     smooth_cmap = mcolors.LinearSegmentedColormap.from_list("custom_smooth", list(zip(norm_levels, colors)))
     
@@ -162,10 +196,10 @@ def create_map(config_data, lons, lats, temp_data, map_title_time):
     
     if len(levels) > 1:
         smooth_levels = np.linspace(min_val, max_val, 100)
-        karte = ax.contourf(lons, lats, temp_data, levels=smooth_levels, cmap=smooth_cmap, extend='both', alpha=0.95)
+        karte = ax.contourf(lons, lats, data, levels=smooth_levels, cmap=smooth_cmap, extend='both', alpha=0.95)
         
         cbar = fig.colorbar(karte, ax=ax, fraction=0.046, pad=0.04, ticks=levels)
-        cbar.set_label('Temperatur in °C', color='white', size=12)
+        cbar.set_label(legend_title, color='white', size=12)
         cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
 
     world.boundary.plot(ax=ax, edgecolor='#555555', linewidth=0.8, alpha=0.8)
@@ -175,40 +209,45 @@ def create_map(config_data, lons, lats, temp_data, map_title_time):
     ax.set_ylim(47.0, 55.0)
     ax.axis('off')
     
-    # Optional: Ein kleiner Text direkt in der Karte
     ax.text(5.7, 54.7, f"ICON-D2 | {map_title_time}", color='white', fontsize=10, 
             bbox=dict(facecolor='#0E1117', alpha=0.7, edgecolor='none'))
-    
     return fig
 
 # --- BENUTZEROBERFLÄCHE (UI) ---
 st.sidebar.header("⚙️ Allgemeine Einstellungen")
-model_choice = st.sidebar.selectbox("Modell auswählen:", ["ICON-D2 (2.2km)"])
-param_choice = st.sidebar.selectbox("Parameter auswählen:", ["Temperatur (2m)"])
+model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)"])
+
+available_runs = get_available_runs()
+run_label = st.sidebar.selectbox("Modelllauf (Letzte 24h):", list(available_runs.keys()))
+run_time = available_runs[run_label]
+
+param_choice = st.sidebar.selectbox("Parameter:", ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"])
 st.sidebar.divider()
 
-# Ausklappbares Menü für die Farben
-with st.sidebar.expander("🎨 Farb- & Werte-Einstellungen", expanded=False):
-    st.write("Definiere deine eigenen Schwellenwerte:")
+# Stelle sicher, dass die Config für den aktuellen Parameter existiert
+if param_choice not in st.session_state.config:
+    st.session_state.config[param_choice] = DEFAULT_CONFIGS[param_choice]
+
+with st.sidebar.expander(f"🎨 Farben für {param_choice}", expanded=False):
     new_config = []
-    for i, item in enumerate(st.session_state.config):
+    for i, item in enumerate(st.session_state.config[param_choice]):
         col1, col2, col3 = st.columns([2, 2, 1])
         with col1:
-            val = st.number_input("Wert", value=float(item['value']), step=1.0, key=f"val_{i}", label_visibility="collapsed")
+            val = st.number_input("Wert", value=float(item['value']), step=1.0, key=f"val_{param_choice}_{i}", label_visibility="collapsed")
         with col2:
-            color = st.color_picker("Farbe", value=item['color'], key=f"col_{i}", label_visibility="collapsed")
+            color = st.color_picker("Farbe", value=item['color'], key=f"col_{param_choice}_{i}", label_visibility="collapsed")
         with col3:
-            if st.button("🗑️", key=f"del_{i}"):
-                st.session_state.config.pop(i)
+            if st.button("🗑️", key=f"del_{param_choice}_{i}"):
+                st.session_state.config[param_choice].pop(i)
                 st.rerun()
         new_config.append({"value": val, "color": color})
     
-    st.session_state.config = new_config
+    st.session_state.config[param_choice] = new_config
 
     col_add, col_save = st.columns(2)
     with col_add:
-        if st.button("➕ Neuer Wert"):
-            st.session_state.config.append({"value": 0.0, "color": "#ffffff"})
+        if st.button("➕ Neu"):
+            st.session_state.config[param_choice].append({"value": 0.0, "color": "#ffffff"})
             st.rerun()
     with col_save:
         if st.button("💾 Speichern"):
@@ -216,35 +255,27 @@ with st.sidebar.expander("🎨 Farb- & Werte-Einstellungen", expanded=False):
                 save_config(st.session_state.config)
 st.sidebar.divider()
 
-# --- HAUPTBEREICH (Karten-Steuerung & Zeit) ---
-run_time = get_latest_run_time()
+# --- HAUPTBEREICH ---
+st.info(f"Basis-Modelllauf: **{run_label}**")
+    
+st.markdown(f"### ⏱️ Zeitschritt für {param_choice}")
+forecast_hour = st.slider("Vorhersagestunde", min_value=0, max_value=48, value=0, step=1, format="+%dh")
 
-if run_time:
-    # Laufzeit in UTC anzeigen
-    st.info(f"Basis-Modelllauf: {run_time.strftime('%d.%m.%Y | %H:00')} UTC")
-    
-    # Der neue Schieberegler
-    st.markdown("### ⏱️ Zeitschritt auswählen")
-    forecast_hour = st.slider("Vorhersagestunde", min_value=0, max_value=48, value=0, step=1, format="+%dh")
-    
-    # Zeit umrechnen in MESZ/MEZ (Europe/Berlin)
-    forecast_time_utc = run_time + timedelta(hours=forecast_hour)
-    local_tz = ZoneInfo("Europe/Berlin")
-    forecast_time_local = forecast_time_utc.astimezone(local_tz)
-    
-    # Zeit formatiert anzeigen
-    time_string = f"{forecast_time_local.strftime('%d.%m.%Y')} um {forecast_time_local.strftime('%H:00')} Uhr"
-    st.success(f"**Gültig für:** +{forecast_hour}h ➔ {time_string} (MEZ/MESZ)")
-    
-    # Der Render-Button unterhalb des Sliders
-    if st.button("🚀 Karte für diese Stunde rendern", type="primary"):
-        with st.spinner(f"Lade ICON-D2 Daten für +{forecast_hour}h vom DWD Server..."):
-            lons, lats, temp_data = get_icon_data(run_time, forecast_hour)
-            
-            if lons is not None:
-                with st.spinner("Rendere Karte..."):
-                    fertige_grafik = create_map(st.session_state.config, lons, lats, temp_data, f"+{forecast_hour}h | {time_string}")
-                    st.pyplot(fertige_grafik)
-                    st.toast("Modellkarte erfolgreich generiert!", icon="✅")
-else:
-    st.error("Konnte aktuell keine Verbindung zum DWD-Server aufbauen oder keinen Lauf finden.")
+forecast_time_utc = run_time + timedelta(hours=forecast_hour)
+local_tz = ZoneInfo("Europe/Berlin")
+forecast_time_local = forecast_time_utc.astimezone(local_tz)
+
+time_string = f"{forecast_time_local.strftime('%d.%m.%Y')} um {forecast_time_local.strftime('%H:00')} Uhr"
+st.success(f"**Gültig für:** +{forecast_hour}h ➔ {time_string} (MEZ/MESZ)")
+
+if st.button("🚀 Karte für diese Stunde rendern", type="primary"):
+    with st.spinner(f"Lade ICON-D2 {param_choice} (+{forecast_hour}h) vom DWD..."):
+        lons, lats, data, legend_title = load_parameter_data(run_time, forecast_hour, param_choice)
+        
+        if lons is not None:
+            with st.spinner("Rendere Karte..."):
+                fertige_grafik = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_string}", legend_title)
+                st.pyplot(fertige_grafik)
+                st.toast("Modellkarte erfolgreich generiert!", icon="✅")
+        else:
+            st.error("Dieser Datensatz ist auf dem DWD-Server (noch) nicht verfügbar. Eventuell rechnet der Lauf noch!")
