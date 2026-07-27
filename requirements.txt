@@ -3,3 +3,7 @@ numpy
 matplotlib
 geopandas
 PyGithub
+requests
+xarray
+cfgrib
+eccodes
