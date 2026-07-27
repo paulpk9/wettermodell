@@ -17,7 +17,7 @@ import xarray as xr
 st.set_page_config(page_title="Modellkarten-Generator", page_icon="🗺️", layout="wide")
 st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
 
-# --- STANDARD-KONFIGURATION (Jetzt für jeden Parameter einzeln) ---
+# --- STANDARD-KONFIGURATION (Für jeden Parameter einzeln) ---
 DEFAULT_CONFIGS = {
     "Temperatur (2m)": [
         {"value": -10.0, "color": "#313695"},
@@ -26,17 +26,17 @@ DEFAULT_CONFIGS = {
         {"value": 30.0, "color": "#d73027"}
     ],
     "Akk. Niederschlag (mm)": [
-        {"value": 0.0, "color": "#ffffff"},  # Weiß für trocken
-        {"value": 1.0, "color": "#a6cee3"},  # Leichtes Blau
-        {"value": 10.0, "color": "#1f78b4"}, # Dunkles Blau
-        {"value": 30.0, "color": "#33a02c"}  # Grün (Starkregen)
+        {"value": 0.0, "color": "#ffffff"},
+        {"value": 1.0, "color": "#a6cee3"},
+        {"value": 10.0, "color": "#1f78b4"},
+        {"value": 30.0, "color": "#33a02c"}
     ],
     "Niederschlagsrate (mm/h)": [
         {"value": 0.0, "color": "#ffffff"},
         {"value": 0.5, "color": "#a6cee3"},
         {"value": 2.0, "color": "#1f78b4"},
         {"value": 10.0, "color": "#33a02c"},
-        {"value": 25.0, "color": "#fb9a99"}  # Rot (Gewitterschauer)
+        {"value": 25.0, "color": "#fb9a99"}
     ]
 }
 
@@ -54,7 +54,6 @@ def load_config():
             repo = g.get_repo(st.secrets["GITHUB_REPO"])
             file = repo.get_contents("config.json")
             loaded_data = json.loads(file.decoded_content.decode())
-            # Rückwärtskompatibilität: Falls es noch die alte Liste ist, packe sie in Temperatur
             if isinstance(loaded_data, list):
                 return {"Temperatur (2m)": loaded_data, "Akk. Niederschlag (mm)": DEFAULT_CONFIGS["Akk. Niederschlag (mm)"], "Niederschlagsrate (mm/h)": DEFAULT_CONFIGS["Niederschlagsrate (mm/h)"]}
             return loaded_data
@@ -110,7 +109,7 @@ def get_available_runs():
     latest_run = now.replace(hour=latest_run_hour, minute=0, second=0, microsecond=0)
     
     runs = {}
-    for i in range(8): # Letzte 24 Stunden (8 Läufe a 3h)
+    for i in range(8):
         r = latest_run - timedelta(hours=i*3)
         label = f"{r.strftime('%d.%m.%Y')} | {r.hour:02d}Z (UTC)"
         runs[label] = r
@@ -137,21 +136,24 @@ def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
             temp_path = f.name
         
         ds = xr.open_dataset(temp_path, engine='cfgrib')
-        vals = ds[var_name].values
-        lats = ds['latitude'].values
-        lons = ds['longitude'].values
+        
+        # WICHTIGER FIX: .squeeze() entfernt nutzlose 3D/4D-Dimensionen und macht die Daten 2D
+        vals = ds[var_name].values.squeeze()
+        lats = ds['latitude'].values.squeeze()
+        lons = ds['longitude'].values.squeeze()
         
         ds.close()
         os.remove(temp_path)
         return lons, lats, vals
-    except Exception:
+    except Exception as e:
+        print(f"Fehler beim Laden: {e}")
         return None, None, None
 
-# --- PARAMETER-LOGIK (Die Meteorologische Aufbereitung) ---
+# --- PARAMETER-LOGIK ---
 def load_parameter_data(run_time, forecast_hour, param_name):
     if param_name == "Temperatur (2m)":
         lons, lats, vals = get_raw_grib(run_time, forecast_hour, "t_2m", "2d_t_2m", "t2m")
-        if vals is not None: vals = vals - 273.15 # Kelvin in Celsius
+        if vals is not None: vals = vals - 273.15
         return lons, lats, vals, "Temperatur in °C"
         
     elif param_name == "Akk. Niederschlag (mm)":
@@ -161,15 +163,14 @@ def load_parameter_data(run_time, forecast_hour, param_name):
     elif param_name == "Niederschlagsrate (mm/h)":
         if forecast_hour == 0:
             lons, lats, vals = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
-            if vals is not None: vals = np.zeros_like(vals) # Stunde 0 = 0mm/h
+            if vals is not None: vals = np.zeros_like(vals)
             return lons, lats, vals, "Regenrate in mm/h"
         else:
-            # Trick: Stunde H minus Stunde H-1 rechnen
             lons, lats, vals_h = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
             _, _, vals_h1 = get_raw_grib(run_time, forecast_hour - 1, "tot_prec", "2d_tot_prec", "tp")
             if vals_h is not None and vals_h1 is not None:
                 rate = vals_h - vals_h1
-                rate = np.clip(rate, 0, None) # Minuswerte durch Rundungsfehler verhindern
+                rate = np.clip(rate, 0, None)
                 return lons, lats, rate, "Regenrate in mm/h"
     
     return None, None, None, ""
@@ -183,7 +184,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title):
     colors = [c['color'] for c in sorted_conf]
     
     min_val, max_val = min(levels), max(levels)
-    # Verhindere Division durch Null, falls alle Werte gleich sind
     if max_val == min_val: max_val = min_val + 1 
     
     norm_levels = [(v - min_val) / (max_val - min_val) for v in levels]
@@ -224,7 +224,6 @@ run_time = available_runs[run_label]
 param_choice = st.sidebar.selectbox("Parameter:", ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"])
 st.sidebar.divider()
 
-# Stelle sicher, dass die Config für den aktuellen Parameter existiert
 if param_choice not in st.session_state.config:
     st.session_state.config[param_choice] = DEFAULT_CONFIGS[param_choice]
 
