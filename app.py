@@ -1,27 +1,44 @@
 import streamlit as st
 
-# Titel und Layout der Seite
 st.set_page_config(
-    page_title="Regionale Wetter-KI",
-    page_icon="🌦️",
+    page_title="Regionale Wetter-KI & Modellkarten",
+    page_icon="🗺️",
     layout="wide"
 )
 
-# Überschrift
-st.title("🌦️ Mein regionales KI-Wettermodell")
-st.write("Willkommen in meiner Wetter-Zentrale! Hier entsteht Schritt für Schritt das eigene Downscaling-Modell.")
+st.title("🗺️ Regionale Wetter-Zentrale & Modellkarten")
+st.write("Hier siehst du die Modellkarten-Ansicht ähnlich wie bei großen Wetterportalen – angepasst auf deine Region.")
 
-# Eine kleine Sidebar für Einstellungen
-st.sidebar.header("⚙️ Einstellungen")
+# Sidebar für die Steuerung
+st.sidebar.header("⚙️ Modell-Steuerung")
 region = st.sidebar.selectbox(
-    "Wähle deine Region:",
-    ["Deutschland (Gesamt)", "Mitteldeutschland", "Brandenburg / Region Elbe-Elster"]
+    "Region wählen:",
+    ["Deutschland", "Mitteldeutschland", "Brandenburg (Elbe-Elster)"]
 )
 
-st.sidebar.write(f"Aktuell ausgewählt: **{region}**")
+parameter = st.sidebar.selectbox(
+    "Meteorologischer Parameter:",
+    ["Temperatur (2m)", "Niederschlag / Radar", "Windböen"]
+)
 
-# Hauptbereich
-st.info("Das Repository ist bereit. Als Nächstes bringen wir die Datenquelle (GRIB2 & DWD) an den Start!")
+st.sidebar.divider()
+st.sidebar.info("Modell-Basis: DWD ICON / Open Data")
 
-if st.button("System-Check starten"):
-    st.success("App läuft stabil auf Streamlit! Bereit für den nächsten Baustein.")
+# Hauptbereich: Anzeige der "Modellkarte"
+st.subheader(f"Modellkarte: {parameter} für {region}")
+
+# Platzhalter für die Karte (hier binden wir später die echten Daten oder gerenderten GRIB2-Plots ein)
+if parameter == "Temperatur (2m)":
+    st.success("Lade Temperatur-Gitterdaten...")
+    # Hier könnte später deine gerenderte Karte stehen
+    st.image("https://images.unsplash.com/photo-1592210454359-9043f067919b?auto=format&fit=crop&w=1000&q=80", 
+             caption=f"Beispiel-Ansicht: Temperaturmodell für {region}")
+
+elif parameter == "Niederschlag / Radar":
+    st.warning("Verknüpfe Regenradar-Echtzeitdaten...")
+    st.image("https://images.unsplash.com/photo-1534274988757-a28bf1a57c17?auto=format&fit=crop&w=1000&q=80", 
+             caption=f"Beispiel-Ansicht: Niederschlag/Radar für {region}")
+
+else:
+    st.info("Lade Winddaten...")
+    st.markdown("*(Hier erscheint demnächst die Wind-Modellkarte)*")
