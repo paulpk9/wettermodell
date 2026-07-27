@@ -1,54 +1,64 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+import geopandas as gpd
 
 # Seiten-Layout
 st.set_page_config(page_title="Modellkarten-Generator", page_icon="🗺️", layout="wide")
 
-st.title("🗺️ Statische Modellkarte (Prototyp)")
-st.write("Hier testen wir die Zeichen-Logik der Modellkarte. Es werden fiktive Daten generiert, die wie ein echtes Temperatur-Raster aussehen.")
+st.title("🗺️ Statische Modellkarte (Darkmode & Grenzen)")
+st.write("Jetzt mit echten Bundesland-Grenzen und modernem Darkmode-Design.")
 
-# Funktion: Generiert das Bild
-def create_dummy_map():
-    # 1. Wir definieren das Gitter für Deutschland
-    # Längengrad (West-Ost): ca. 5.8 bis 15.0
-    # Breitengrad (Süd-Nord): ca. 47.2 bis 55.0
-    lons = np.linspace(5.8, 15.0, 100)
-    lats = np.linspace(47.2, 55.0, 100)
+# --- DATEN LADEN (mit Cache, damit es schnell geht) ---
+@st.cache_data
+def load_borders():
+    # Lädt eine offene, leichte GeoJSON-Datei mit den deutschen Bundesländern
+    url = "https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/main/2_bundeslaender/4_niedrig.geo.json"
+    return gpd.read_file(url)
+
+# --- ZEICHNEN DER KARTE ---
+def create_dark_map():
+    # 1. Grenzen laden
+    borders = load_borders()
     
-    # Raster erzeugen (wie ein Koordinatensystem)
+    # 2. Koordinaten-Gitter für Deutschland (etwas größer gefasst)
+    lons = np.linspace(5.5, 15.5, 150)
+    lats = np.linspace(47.0, 55.5, 150)
     Lons, Lats = np.meshgrid(lons, lats)
     
-    # 2. Fiktive Wetterdaten erzeugen (Temperatur)
-    # Basis 25 Grad, nach Norden kühler, plus ein paar "Wellen" (Sinus) für die Optik
-    Temp = 25 - (Lats - 47.2) * 1.8 + np.sin(Lons * 3) * 2 
+    # 3. Fiktive Daten generieren (mit etwas komplexeren "Wellen" für eine echte Optik)
+    Temp = 25 - (Lats - 47.0) * 2 + np.sin(Lons * 4) * 2 + np.cos(Lats * 3) * 1.5
 
-    # 3. Die Karte zeichnen (Matplotlib)
-    fig, ax = plt.subplots(figsize=(10, 8))
+    # 4. Karte einrichten (Darkmode)
+    # Farbe #0E1117 ist exakt der Hintergrund-Farbton des Streamlit Darkmodes
+    bg_color = '#0E1117'
+    fig, ax = plt.subplots(figsize=(10, 10))
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
     
-    # contourf zeichnet die eingefärbten Flächen (die klassische Modellkarten-Optik)
-    # cmap='coolwarm' ist die Farbskala von Blau (kalt) zu Rot (warm)
-    karte = ax.contourf(Lons, Lats, Temp, levels=20, cmap='coolwarm')
+    # 5. Temperatur-Felder plotten
+    # 'magma' sieht im Darkmode extrem gut und modern aus. alpha=0.85 macht es leicht transparent.
+    karte = ax.contourf(Lons, Lats, Temp, levels=25, cmap='magma', alpha=0.85)
     
-    # Eine Farbskala an der Seite hinzufügen
+    # 6. Bundesländer darüberlegen
+    # Wir zeichnen nur die Ränder (boundary) in strahlendem Weiß
+    borders.boundary.plot(ax=ax, edgecolor='#ffffff', linewidth=1.2, alpha=0.9)
+    
+    # 7. Ansicht auf Deutschland zuschneiden und Rahmen ausblenden
+    ax.set_xlim(5.5, 15.5)
+    ax.set_ylim(47.0, 55.5)
+    ax.axis('off') # Versteckt die X/Y Achsen für einen reinen "Karten"-Look
+    
+    # 8. Die Farbskala (Legende) anpassen (auch im Darkmode-Stil)
     cbar = fig.colorbar(karte, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('Temperatur in °C')
+    cbar.set_label('Temperatur in °C', color='white', size=12)
+    cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
     
-    # Achsen anpassen
-    ax.set_title("Fiktives Temperatur-Modell (Deutschland-Ausschnitt)")
-    ax.set_xlabel("Längengrad (Ost)")
-    ax.set_ylabel("Breitengrad (Nord)")
-    
-    # Das fertige Bild zurückgeben
     return fig
 
-# Der Auslöser auf der Webseite
-if st.button("Wetterkarte jetzt rendern"):
-    with st.spinner("Berechne mathematisches Gitter und zeichne Karte..."):
-        # Funktion aufrufen
-        fertige_grafik = create_dummy_map()
-        
-        # Die fertige Grafik in Streamlit anzeigen
+# --- STREAMLIT OBERFLÄCHE ---
+if st.button("Darkmode-Karte generieren"):
+    with st.spinner("Lade Geodaten und rendere Grafik..."):
+        fertige_grafik = create_dark_map()
         st.pyplot(fertige_grafik)
-        
-        st.success("Erfolgreich generiert! Genauso funktioniert es später auch mit den echten GRIB2-Daten.")
+        st.success("Sieht das nicht gleich viel mehr nach Profi-Wettermodell aus?")
