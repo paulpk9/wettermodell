@@ -17,7 +17,7 @@ import xarray as xr
 st.set_page_config(page_title="Modellkarten-Generator", page_icon="🗺️", layout="wide")
 st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
 
-# --- STANDARD-KONFIGURATION (Für jeden Parameter einzeln) ---
+# --- STANDARD-KONFIGURATION ---
 DEFAULT_CONFIGS = {
     "Temperatur (2m)": [
         {"value": -10.0, "color": "#313695"},
@@ -115,7 +115,7 @@ def get_available_runs():
         runs[label] = r
     return runs
 
-# --- DWD GRIB2 DOWNLOAD-FUNKTION ---
+# --- DWD GRIB2 DOWNLOAD-FUNKTION (Mit 100% 2D-Sicherheit) ---
 @st.cache_data(ttl=3600)
 def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
     run_str = f"{run_time.hour:02d}"
@@ -137,11 +137,24 @@ def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
         
         ds = xr.open_dataset(temp_path, engine='cfgrib')
         
-        # WICHTIGER FIX: .squeeze() entfernt nutzlose 3D/4D-Dimensionen und macht die Daten 2D
-        vals = ds[var_name].values.squeeze()
-        lats = ds['latitude'].values.squeeze()
-        lons = ds['longitude'].values.squeeze()
+        vals = ds[var_name].values
+        lats = ds['latitude'].values
+        lons = ds['longitude'].values
         
+        # --- DER FIX: Radikales Herunterbrechen auf 2D ---
+        # Falls die Werte 3D oder 4D sind, nehmen wir nur die erste Schicht
+        while vals.ndim > 2:
+            vals = vals[0]
+            
+        # Falls Koordinaten 1D sind (Standard bei regular-lat-lon), bauen wir ein 2D Gitter
+        if lons.ndim == 1 and lats.ndim == 1:
+            lons, lats = np.meshgrid(lons, lats)
+            
+        while lons.ndim > 2:
+            lons = lons[0]
+        while lats.ndim > 2:
+            lats = lats[0]
+            
         ds.close()
         os.remove(temp_path)
         return lons, lats, vals
