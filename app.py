@@ -137,10 +137,9 @@ def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
         
         ds = xr.open_dataset(temp_path, engine='cfgrib')
         
-        # WICHTIG: Erster Check der Variable (manchmal heißt Taupunkt 'd2m', manchmal '2d')
         actual_var = var_name
         if var_name not in ds.variables:
-            actual_var = list(ds.data_vars)[0] # Nimm den ersten Daten-Block als Fallback
+            actual_var = list(ds.data_vars)[0] 
             
         vals = ds[actual_var].values
         lats = ds['latitude'].values
@@ -160,37 +159,44 @@ def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
 
 # --- KI & THERMODYNAMIK DOWNSCALING ---
 def apply_ai_downscaling(lons, lats, t2m, td2m):
-    # 1. Auflösung auf 1x1km hochrechnen (Zoom-Faktor ~ 2.2)
+    # 1. DEN NaN-VIRUS BEHEBEN: Wir ersetzen fehlende Randpixel kurzzeitig
+    # durch den Durchschnitt, damit der Zoom-Filter nicht zerstört wird.
+    t2m_safe = np.nan_to_num(t2m, nan=np.nanmean(t2m))
+    td2m_safe = np.nan_to_num(td2m, nan=np.nanmean(td2m))
+    
+    # 2. Auflösung auf 1x1km hochrechnen (Zoom-Faktor ~ 2.2)
     zoom_f = 2.2
-    t2m_high = ndimage.zoom(t2m, zoom_f, order=3)
-    td2m_high = ndimage.zoom(td2m, zoom_f, order=3)
+    # order=1 (bilinear) ist extrem stabil bei Wetterdaten
+    t2m_high = ndimage.zoom(t2m_safe, zoom_f, order=1)
+    td2m_high = ndimage.zoom(td2m_safe, zoom_f, order=1)
     lons_high = ndimage.zoom(lons, zoom_f, order=1)
     lats_high = ndimage.zoom(lats, zoom_f, order=1)
     
-    # 2. Relative Feuchte (%) berechnen (Magnus-Formel)
-    # Vermeide Division durch Null oder zu große Exponenten
+    # 3. Relative Feuchte (%) berechnen (Magnus-Formel)
     td2m_c = np.clip(td2m_high, -50, 50)
     t2m_c = np.clip(t2m_high, -50, 50)
     
     e_vapor = np.exp((17.625 * td2m_c) / (243.04 + td2m_c))
     e_sat = np.exp((17.625 * t2m_c) / (243.04 + t2m_c))
     rh = 100.0 * (e_vapor / e_sat)
-    rh = np.clip(rh, 0, 100) # Feuchte zwischen 0 und 100%
+    rh = np.clip(rh, 0, 100) 
     
-    # 3. Dynamischer Temperaturgradient (Lapse Rate)
-    # Trockenadiabatisch: ~9.8 K/km (rh=0). Feuchtadiabatisch: ~5.0 K/km (rh=100)
-    lapse_rate = (9.8 - 4.8 * (rh / 100.0)) / 1000.0 # in °C pro Meter
+    # 4. Dynamischer Temperaturgradient (Lapse Rate)
+    # Trockenadiabatisch: ~9.8 K/km. Feuchtadiabatisch: ~5.0 K/km
+    lapse_rate = (9.8 - 4.8 * (rh / 100.0)) / 1000.0 
     
-    # 4. Topographische Simulation (Mock DEM für 1km Details)
-    # Da ein echtes 1km DEM zu groß für den Cloud-Speicher ist, generieren wir
-    # hier ein Fraktal-Relief (Berge und Täler), das die hochaufgelöste Physik zeigt.
-    np.random.seed(42) # Fester Seed, damit Berge nicht wackeln
+    # 5. Topographische Simulation (Berge und Täler)
+    np.random.seed(42) 
     noise = np.random.normal(0, 1, t2m_high.shape)
-    terrain_diff = ndimage.gaussian_filter(noise, sigma=3) * 60.0 # +/- 60m Höhendifferenzen
+    terrain_diff = ndimage.gaussian_filter(noise, sigma=3) * 60.0 
     
-    # 5. Downscaling anwenden
-    # Temperatur ändert sich um: (Gradient * Höhendifferenz)
+    # 6. Downscaling anwenden
     t2m_downscaled = t2m_high - (lapse_rate * terrain_diff)
+    
+    # 7. Die leeren Ränder wieder abschneiden (Original-Maske zoomen)
+    mask = np.isnan(t2m)
+    mask_high = ndimage.zoom(mask.astype(float), zoom_f, order=0) > 0.5
+    t2m_downscaled[mask_high] = np.nan
     
     return lons_high, lats_high, t2m_downscaled
 
@@ -199,10 +205,9 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type):
     if param_name == "Temperatur (2m)":
         lons, lats, t2m = get_raw_grib(run_time, forecast_hour, "t_2m", "2d_t_2m", "t2m")
         if t2m is None: return None, None, None, ""
-        t2m = t2m - 273.15 # In Celsius
+        t2m = t2m - 273.15 
         
         if model_type == "KI-Downscaling (1x1km)":
-            # Lade zusätzlich den Taupunkt für die Feuchte-Physik
             _, _, td2m = get_raw_grib(run_time, forecast_hour, "td_2m", "2d_td_2m", "d2m")
             if td2m is not None:
                 td2m = td2m - 273.15
@@ -250,7 +255,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     ax.set_facecolor(bg_color)
     
     if len(levels) > 1:
-        smooth_levels = np.linspace(min_val, max_val, 150) # Noch feinere Farben für Downscaling
+        smooth_levels = np.linspace(min_val, max_val, 150) 
         karte = ax.contourf(lons, lats, data, levels=smooth_levels, cmap=smooth_cmap, extend='both', alpha=0.95)
         
         cbar = fig.colorbar(karte, ax=ax, fraction=0.046, pad=0.04, ticks=levels)
