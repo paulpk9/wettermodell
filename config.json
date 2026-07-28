@@ -157,24 +157,56 @@
     ],
     "850 hPa Temp.": [
         {
+            "value": -25.0,
+            "color": "#790086"
+        },
+        {
             "value": -20.0,
-            "color": "#1c00e2"
+            "color": "#540090"
+        },
+        {
+            "value": -15.0,
+            "color": "#09008d"
         },
         {
             "value": -10.0,
-            "color": "#0084e2"
+            "color": "#001ce0"
+        },
+        {
+            "value": -5.0,
+            "color": "#00a2d6"
         },
         {
             "value": 0.0,
-            "color": "#0e7f00"
+            "color": "#0a8400"
+        },
+        {
+            "value": 5.0,
+            "color": "#73e000"
         },
         {
             "value": 10.0,
-            "color": "#e8ad00"
+            "color": "#dfcd00"
+        },
+        {
+            "value": 15.0,
+            "color": "#d36f00"
         },
         {
             "value": 20.0,
-            "color": "#e70000"
+            "color": "#d80000"
+        },
+        {
+            "value": 25.0,
+            "color": "#830000"
+        },
+        {
+            "value": 30.0,
+            "color": "#97008d"
+        },
+        {
+            "value": -30.0,
+            "color": "#ca00c1"
         }
     ]
 }
