@@ -38,6 +38,25 @@ DEFAULT_CONFIGS = {
         {"value": 2.0, "color": "#1f78b4"},
         {"value": 10.0, "color": "#33a02c"},
         {"value": 25.0, "color": "#fb9a99"}
+    ],
+    "500 hPa Geopot. Height": [
+        {"value": 500.0, "color": "#313695"}, # Kaltlufttropfen
+        {"value": 540.0, "color": "#e0f3f8"}, # Moderat
+        {"value": 580.0, "color": "#d73027"}  # Sommerhoch
+    ],
+    "850 hPa Temp.": [
+        {"value": -20.0, "color": "#313695"},
+        {"value": -10.0, "color": "#74add1"},
+        {"value": 0.0, "color": "#ffffff"},
+        {"value": 10.0, "color": "#fdae61"},
+        {"value": 20.0, "color": "#d73027"}
+    ],
+    "MLCAPE": [
+        {"value": 0.0, "color": "#ffffff"},
+        {"value": 250.0, "color": "#ffffcc"},
+        {"value": 1000.0, "color": "#fd8d3c"},
+        {"value": 2500.0, "color": "#e31a1c"},
+        {"value": 4000.0, "color": "#800026"}
     ]
 }
 
@@ -56,7 +75,7 @@ def load_config():
             file = repo.get_contents("config.json")
             loaded_data = json.loads(file.decoded_content.decode())
             if isinstance(loaded_data, list):
-                return {"Temperatur (2m)": loaded_data, "Akk. Niederschlag (mm)": DEFAULT_CONFIGS["Akk. Niederschlag (mm)"], "Niederschlagsrate (mm/h)": DEFAULT_CONFIGS["Niederschlagsrate (mm/h)"]}
+                return {"Temperatur (2m)": loaded_data} # Fallback
             return loaded_data
         except Exception:
             pass
@@ -104,75 +123,81 @@ def load_borders():
     return world, bundeslaender
 
 # --- MODELLLÄUFE BERECHNEN ---
-def get_available_runs():
+def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    latest_run_hour = (now.hour // 3) * 3
+    # Globale Modelle rechnen alle 6h (00, 06, 12, 18), D2 rechnet alle 3h
+    step = 6 if "Global" in model_name else 3
+    
+    latest_run_hour = (now.hour // step) * step
     latest_run = now.replace(hour=latest_run_hour, minute=0, second=0, microsecond=0)
     runs = {}
     for i in range(8):
-        r = latest_run - timedelta(hours=i*3)
+        r = latest_run - timedelta(hours=i*step)
         label = f"{r.strftime('%d.%m.%Y')} | {r.hour:02d}Z (UTC)"
         runs[label] = r
     return runs
 
 # --- DWD GRIB2 DOWNLOAD-FUNKTION ---
 @st.cache_data(ttl=3600)
-def get_raw_grib(run_time, forecast_hour, folder, suffix, var_name):
+def get_raw_grib(run_time, forecast_hour, model, folder, var_str, level=None):
     run_str = f"{run_time.hour:02d}"
     date_str = run_time.strftime("%Y%m%d")
     hour_str = f"{forecast_hour:03d}"
     
-    file_name = f"icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{suffix}.grib2.bz2"
-    url = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{folder}/{file_name}"
+    url_candidates = []
     
-    try:
-        dl_resp = requests.get(url)
-        if dl_resp.status_code != 200:
-            return None, None, None
-            
-        grib_data = bz2.decompress(dl_resp.content)
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f:
-            f.write(grib_data)
-            temp_path = f.name
-        
-        ds = xr.open_dataset(temp_path, engine='cfgrib')
-        
-        actual_var = var_name
-        if var_name not in ds.variables:
-            actual_var = list(ds.data_vars)[0] 
-            
-        vals = ds[actual_var].values
-        lats = ds['latitude'].values
-        lons = ds['longitude'].values
-        
-        while vals.ndim > 2: vals = vals[0]
-        if lons.ndim == 1 and lats.ndim == 1: lons, lats = np.meshgrid(lons, lats)
-        while lons.ndim > 2: lons = lons[0]
-        while lats.ndim > 2: lats = lats[0]
-            
-        ds.close()
-        os.remove(temp_path)
-        return lons, lats, vals
-    except Exception as e:
-        print(f"Fehler beim Laden: {e}")
-        return None, None, None
+    # URL Logik für D2 vs EU/Global
+    if "ICON-D2" in model or "KI-Downscaling" in model:
+        url_candidates.append(f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{folder}/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_str}.grib2.bz2")
+    elif "Global" in model:
+        if level:
+            url_candidates.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{level}_{var_str.upper()}.grib2.bz2")
+            url_candidates.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{level}_{var_str.lower()}.grib2.bz2")
+        else:
+            url_candidates.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_str.upper()}.grib2.bz2")
+            url_candidates.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_str.lower()}.grib2.bz2")
 
-# --- KI & THERMODYNAMIK DOWNSCALING ---
+    for url in url_candidates:
+        try:
+            dl_resp = requests.get(url)
+            if dl_resp.status_code == 200:
+                grib_data = bz2.decompress(dl_resp.content)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f:
+                    f.write(grib_data)
+                    temp_path = f.name
+                
+                ds = xr.open_dataset(temp_path, engine='cfgrib')
+                actual_var = list(ds.data_vars)[0] 
+                    
+                vals = ds[actual_var].values
+                lats = ds['latitude'].values
+                lons = ds['longitude'].values
+                
+                while vals.ndim > 2: vals = vals[0]
+                if lons.ndim == 1 and lats.ndim == 1: lons, lats = np.meshgrid(lons, lats)
+                while lons.ndim > 2: lons = lons[0]
+                while lats.ndim > 2: lats = lats[0]
+                    
+                ds.close()
+                os.remove(temp_path)
+                return lons, lats, vals
+        except Exception:
+            continue
+            
+    print(f"Fehler: Konnte Daten für {var_str} nicht finden.")
+    return None, None, None
+
+# --- KI DOWNSCALING ---
 def apply_ai_downscaling(lons, lats, t2m, td2m):
-    # 1. DEN NaN-VIRUS BEHEBEN: Wir ersetzen fehlende Randpixel kurzzeitig
-    # durch den Durchschnitt, damit der Zoom-Filter nicht zerstört wird.
     t2m_safe = np.nan_to_num(t2m, nan=np.nanmean(t2m))
     td2m_safe = np.nan_to_num(td2m, nan=np.nanmean(td2m))
     
-    # 2. Auflösung auf 1x1km hochrechnen (Zoom-Faktor ~ 2.2)
     zoom_f = 2.2
-    # order=1 (bilinear) ist extrem stabil bei Wetterdaten
     t2m_high = ndimage.zoom(t2m_safe, zoom_f, order=1)
     td2m_high = ndimage.zoom(td2m_safe, zoom_f, order=1)
     lons_high = ndimage.zoom(lons, zoom_f, order=1)
     lats_high = ndimage.zoom(lats, zoom_f, order=1)
     
-    # 3. Relative Feuchte (%) berechnen (Magnus-Formel)
     td2m_c = np.clip(td2m_high, -50, 50)
     t2m_c = np.clip(t2m_high, -50, 50)
     
@@ -181,19 +206,14 @@ def apply_ai_downscaling(lons, lats, t2m, td2m):
     rh = 100.0 * (e_vapor / e_sat)
     rh = np.clip(rh, 0, 100) 
     
-    # 4. Dynamischer Temperaturgradient (Lapse Rate)
-    # Trockenadiabatisch: ~9.8 K/km. Feuchtadiabatisch: ~5.0 K/km
     lapse_rate = (9.8 - 4.8 * (rh / 100.0)) / 1000.0 
     
-    # 5. Topographische Simulation (Berge und Täler)
     np.random.seed(42) 
     noise = np.random.normal(0, 1, t2m_high.shape)
     terrain_diff = ndimage.gaussian_filter(noise, sigma=3) * 60.0 
     
-    # 6. Downscaling anwenden
     t2m_downscaled = t2m_high - (lapse_rate * terrain_diff)
     
-    # 7. Die leeren Ränder wieder abschneiden (Original-Maske zoomen)
     mask = np.isnan(t2m)
     mask_high = ndimage.zoom(mask.astype(float), zoom_f, order=0) > 0.5
     t2m_downscaled[mask_high] = np.nan
@@ -201,42 +221,66 @@ def apply_ai_downscaling(lons, lats, t2m, td2m):
     return lons_high, lats_high, t2m_downscaled
 
 # --- PARAMETER-LOGIK ---
-def load_parameter_data(run_time, forecast_hour, param_name, model_type):
+def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pmsl=False):
+    pmsl_data = None
+    
+    # Wenn Isobaren gefordert sind, Luftdruck (PMSL) parallel laden
+    if show_pmsl:
+        _, _, p_raw = get_raw_grib(run_time, forecast_hour, model_type, "pmsl", "pmsl")
+        if p_raw is not None:
+            pmsl_data = p_raw / 100.0 # Umrechnung von Pascal in hPa
+            
     if param_name == "Temperatur (2m)":
-        lons, lats, t2m = get_raw_grib(run_time, forecast_hour, "t_2m", "2d_t_2m", "t2m")
-        if t2m is None: return None, None, None, ""
+        lons, lats, t2m = get_raw_grib(run_time, forecast_hour, model_type, "t_2m", "2d_t_2m")
+        if t2m is None: return None, None, None, "", None
         t2m = t2m - 273.15 
         
         if model_type == "KI-Downscaling (1x1km)":
-            _, _, td2m = get_raw_grib(run_time, forecast_hour, "td_2m", "2d_td_2m", "d2m")
+            _, _, td2m = get_raw_grib(run_time, forecast_hour, model_type, "td_2m", "2d_td_2m")
             if td2m is not None:
                 td2m = td2m - 273.15
                 lons, lats, t2m = apply_ai_downscaling(lons, lats, t2m, td2m)
-            else:
-                st.warning("Taupunkt für Downscaling fehlt. Zeige Standard-Auflösung.")
-                
-        return lons, lats, t2m, "Temperatur in °C"
+        return lons, lats, t2m, "Temperatur in °C", pmsl_data
         
     elif param_name == "Akk. Niederschlag (mm)":
-        lons, lats, vals = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
-        return lons, lats, vals, "Niederschlag in mm"
+        lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, "tot_prec", "2d_tot_prec" if "D2" in model_type else "tot_prec")
+        return lons, lats, vals, "Niederschlag in mm", pmsl_data
         
     elif param_name == "Niederschlagsrate (mm/h)":
+        var_name = "2d_tot_prec" if "D2" in model_type else "tot_prec"
         if forecast_hour == 0:
-            lons, lats, vals = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
+            lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, "tot_prec", var_name)
             if vals is not None: vals = np.zeros_like(vals)
-            return lons, lats, vals, "Regenrate in mm/h"
+            return lons, lats, vals, "Regenrate in mm/h", pmsl_data
         else:
-            lons, lats, vals_h = get_raw_grib(run_time, forecast_hour, "tot_prec", "2d_tot_prec", "tp")
-            _, _, vals_h1 = get_raw_grib(run_time, forecast_hour - 1, "tot_prec", "2d_tot_prec", "tp")
+            lons, lats, vals_h = get_raw_grib(run_time, forecast_hour, model_type, "tot_prec", var_name)
+            _, _, vals_h1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "tot_prec", var_name)
             if vals_h is not None and vals_h1 is not None:
                 rate = vals_h - vals_h1
                 rate = np.clip(rate, 0, None)
-                return lons, lats, rate, "Regenrate in mm/h"
-    return None, None, None, ""
+                return lons, lats, rate, "Regenrate in mm/h", pmsl_data
+                
+    # --- NEUE PARAMETER ---
+    elif param_name == "500 hPa Geopot. Height":
+        lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, "fi", "fi", level="500")
+        if vals is not None: 
+            vals = vals / 9.80665 / 10.0 # Umrechnung von Geopotential (m^2/s^2) in Dekameter (gpdm)
+        return lons, lats, vals, "Geopotential (gpdm)", pmsl_data
+
+    elif param_name == "850 hPa Temp.":
+        lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, "t", "t", level="850")
+        if vals is not None: 
+            vals = vals - 273.15 # Kelvin in Celsius
+        return lons, lats, vals, "Temperatur in °C", pmsl_data
+
+    elif param_name == "MLCAPE":
+        lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, "cape_ml", "cape_ml")
+        return lons, lats, vals, "CAPE (J/kg)", pmsl_data
+
+    return None, None, None, "", None
 
 # --- KARTE ZEICHNEN ---
-def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type):
+def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, pmsl_data=None):
     world, bundeslaender = load_borders()
     
     sorted_conf = sorted(config_list, key=lambda x: x['value'])
@@ -262,35 +306,51 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         cbar.set_label(legend_title, color='white', size=12)
         cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
 
+    # Isobaren (Luftdruck-Linien) drüber zeichnen, falls vorhanden
+    if pmsl_data is not None:
+        iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='white', linewidths=1.0, alpha=0.8)
+        ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors='white')
+
     world.boundary.plot(ax=ax, edgecolor='#555555', linewidth=0.8, alpha=0.8)
     bundeslaender.boundary.plot(ax=ax, edgecolor='#ffffff', linewidth=1.2, alpha=1.0)
     
-    ax.set_xlim(5.5, 15.5)
-    ax.set_ylim(47.0, 55.0)
+    # Dynamischer Ausschnitt: Europa für Global, Deutschland für D2
+    if "Global" in model_type:
+        ax.set_xlim(-15.0, 30.0) # Blick auf West- und Mitteleuropa
+        ax.set_ylim(35.0, 65.0)
+    else:
+        ax.set_xlim(5.5, 15.5)
+        ax.set_ylim(47.0, 55.0)
+        
     ax.axis('off')
     
-    model_name = "ICON-D2" if model_type == "ICON-D2 (2.2km)" else "KI-Downscaling (1x1km)"
-    ax.text(5.7, 54.7, f"{model_name} | {map_title_time}", color='white', fontsize=10, 
+    ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.5, f"{model_type} | {map_title_time}", color='white', fontsize=10, 
             bbox=dict(facecolor='#0E1117', alpha=0.7, edgecolor='none'))
     return fig
 
 # --- BENUTZEROBERFLÄCHE (UI) ---
 st.sidebar.header("⚙️ Allgemeine Einstellungen")
-model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)", "KI-Downscaling (1x1km)"])
+model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)", "KI-Downscaling (1x1km)", "ICON Global / EU (~6km)"])
 
-available_runs = get_available_runs()
+available_runs = get_available_runs(model_choice)
 run_label = st.sidebar.selectbox("Modelllauf (Letzte 24h):", list(available_runs.keys()))
 run_time = available_runs[run_label]
 
-param_choice = st.sidebar.selectbox("Parameter:", ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"])
+param_list = ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE"]
+param_choice = st.sidebar.selectbox("Parameter:", param_list)
+
+# Isobaren-Schalter (nur bei 850 hPa Temp anzeigen)
+show_pmsl = False
+if param_choice == "850 hPa Temp.":
+    show_pmsl = st.sidebar.checkbox("Luftdruck-Linien (Isobaren) anzeigen", value=True)
 
 if model_choice == "KI-Downscaling (1x1km)" and param_choice != "Temperatur (2m)":
-    st.sidebar.warning("⚠️ KI-Downscaling ist derzeit nur für die Temperatur (Thermodynamik) aktiv.")
+    st.sidebar.warning("⚠️ KI-Downscaling ist derzeit nur für die 2m-Temperatur (Thermodynamik) aktiv.")
 
 st.sidebar.divider()
 
 if param_choice not in st.session_state.config:
-    st.session_state.config[param_choice] = DEFAULT_CONFIGS[param_choice]
+    st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
 
 with st.sidebar.expander(f"🎨 Farben für {param_choice}", expanded=False):
     new_config = []
@@ -334,11 +394,11 @@ st.success(f"**Gültig für:** +{forecast_hour}h ➔ {time_string} (MEZ/MESZ)")
 
 if st.button("🚀 Karte für diese Stunde rendern", type="primary"):
     with st.spinner(f"Lade Daten und berechne Physik..."):
-        lons, lats, data, legend_title = load_parameter_data(run_time, forecast_hour, param_choice, model_choice)
+        lons, lats, data, legend_title, pmsl_data = load_parameter_data(run_time, forecast_hour, param_choice, model_choice, show_pmsl)
         
         if lons is not None:
-            with st.spinner("Rendere hochauflösende Karte..."):
-                fertige_grafik = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_string}", legend_title, model_choice)
+            with st.spinner("Rendere Karte..."):
+                fertige_grafik = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_string}", legend_title, model_choice, pmsl_data)
                 st.pyplot(fertige_grafik)
                 st.toast("Modellkarte erfolgreich generiert!", icon="✅")
         else:
