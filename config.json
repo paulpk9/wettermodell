@@ -208,5 +208,71 @@
             "value": -30.0,
             "color": "#ca00c1"
         }
+    ],
+    "MLCAPE": [
+        {
+            "value": 0.0,
+            "color": "#088300"
+        },
+        {
+            "value": 200.0,
+            "color": "#9cd500"
+        },
+        {
+            "value": 400.0,
+            "color": "#dbe400"
+        },
+        {
+            "value": 600.0,
+            "color": "#d89700"
+        },
+        {
+            "value": 800.0,
+            "color": "#dc5e00"
+        },
+        {
+            "value": 1000.0,
+            "color": "#db1d00"
+        },
+        {
+            "value": 1250.0,
+            "color": "#9b0003"
+        },
+        {
+            "value": 1500.0,
+            "color": "#6b0000"
+        },
+        {
+            "value": 1750.0,
+            "color": "#460028"
+        },
+        {
+            "value": 2000.0,
+            "color": "#56004e"
+        },
+        {
+            "value": 2500.0,
+            "color": "#7f0082"
+        },
+        {
+            "value": 3000.0,
+            "color": "#b800ce"
+        },
+        {
+            "value": 3500.0,
+            "color": "#ef5cff"
+        },
+        {
+            "value": 4000.0,
+            "color": "#ffa6fd"
+        },
+        {
+            "value": 4500.0,
+            "color": "#fcdeff"
+        },
+        {
+            "value": 5000.0,
+            "color": "#aaaaaa"
+        }
     ]
 }
