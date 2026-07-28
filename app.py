@@ -14,10 +14,16 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import xarray as xr
 import scipy.ndimage as ndimage
+import io
 
-# --- SEITEN-LAYOUT ---
+# --- SEITEN-LAYOUT & SESSION STATE ---
 st.set_page_config(page_title="Modellkarten-Generator", page_icon="🗺️", layout="wide")
 st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
+
+if "map_cache" not in st.session_state:
+    st.session_state.map_cache = {}
+if "f_hour" not in st.session_state:
+    st.session_state.f_hour = 0
 
 # --- STANDARD-KONFIGURATION ---
 DEFAULT_CONFIGS = {
@@ -31,7 +37,7 @@ DEFAULT_CONFIGS = {
     "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}]
 }
 
-# --- REGIONEN DEFINITIONEN (Bounding Boxes) ---
+# --- REGIONEN DEFINITIONEN ---
 REGIONS = {
     "Europa": [-15.0, 30.0, 35.0, 65.0],
     "Deutschland": [5.5, 15.5, 47.0, 55.0],
@@ -45,7 +51,7 @@ REGIONS = {
     "Schleswig-Holstein / HH": [7.8, 11.5, 53.3, 55.1]
 }
 
-# --- GITHUB LADE- & SPEICHER-FUNKTIONEN ---
+# --- GITHUB CONFIG ---
 def get_github_client():
     if "GITHUB_TOKEN" in st.secrets:
         return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
@@ -70,49 +76,51 @@ def save_config(config_data):
             repo = g.get_repo(st.secrets["GITHUB_REPO"])
             try:
                 file = repo.get_contents("config.json")
-                repo.update_file("config.json", "Update Farbskalen", json.dumps(config_data, indent=4), file.sha)
+                repo.update_file("config.json", "Update", json.dumps(config_data, indent=4), file.sha)
             except:
-                repo.create_file("config.json", "Create config", json.dumps(config_data, indent=4))
-            st.success("Erfolgreich auf GitHub gespeichert!")
-        except Exception as e: st.error(f"Fehler beim Speichern: {e}")
+                repo.create_file("config.json", "Create", json.dumps(config_data, indent=4))
+            st.success("Erfolgreich gespeichert!")
+        except Exception as e: st.error(f"Fehler: {e}")
 
 if "config" not in st.session_state:
     st.session_state.config = load_config()
 
-# --- DATEN LADEN (Grenzen) ---
+# --- GRENZEN LADEN ---
 @st.cache_data
 def load_borders():
     world_url = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson"
     bl_url = "https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/main/2_bundeslaender/4_niedrig.geo.json"
-    world_resp, bl_resp = requests.get(world_url).text, requests.get(bl_url).text
-    
+    w_r, bl_r = requests.get(world_url).text, requests.get(bl_url).text
     with tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f1, tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f2:
-        f1.write(world_resp); f1_name = f1.name
-        f2.write(bl_resp); f2_name = f2.name
-        
-    world = gpd.read_file(f1_name)
-    bundeslaender = gpd.read_file(f2_name)
-    os.remove(f1_name); os.remove(f2_name)
-    return world, bundeslaender
+        f1.write(w_r); f1_name = f1.name
+        f2.write(bl_r); f2_name = f2.name
+    return gpd.read_file(f1_name), gpd.read_file(f2_name)
 
-# --- MODELLLÄUFE BERECHNEN ---
+# --- NEUE LOGIK: VERFÜGBARKEITS-CHECK (Lauf + Dauer + 30 Min Puffer) ---
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    if "AIFS" in model_name: step = 12
-    elif "GFS" in model_name or "EU" in model_name: step = 6
-    else: step = 3
     
-    latest_run = now.replace(hour=(now.hour // step) * step, minute=0, second=0, microsecond=0)
+    if "AIFS" in model_name: 
+        step, delay = 12, 9.5
+    elif "GFS" in model_name: 
+        step, delay = 6, 5.0
+    elif "EU" in model_name: 
+        step, delay = 6, 3.0
+    else: 
+        step, delay = 3, 2.0
+        
+    effective_now = now - timedelta(hours=delay)
+    latest_run = effective_now.replace(hour=(effective_now.hour // step) * step, minute=0, second=0, microsecond=0)
+    
     return {f"{ (latest_run - timedelta(hours=i*step)).strftime('%d.%m.%Y | %H:02d') }Z (UTC)": (latest_run - timedelta(hours=i*step)) for i in range(8)}
 
-# --- INTELLIGENTER GRIB2 DOWNLOADER ---
-@st.cache_data(ttl=3600)
+# --- GRIB DOWNLOADER ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
     
     if "AIFS" in model:
-        hour_str_aifs = str(forecast_hour) 
-        url = f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{hour_str_aifs}h-oper-fc.grib2"
+        url = f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{str(forecast_hour)}h-oper-fc.grib2"
         return download_and_extract(url)
 
     if "GFS" in model:
@@ -130,8 +138,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         }
         filter_str = var_map.get(param_name, "")
         if param_name == "850 hPa Temp.": filter_str += "&" + var_map["PMSL"]
-        url = f"{base_url}&{filter_str}" if filter_str else None
-        return download_and_extract(url)
+        return download_and_extract(f"{base_url}&{filter_str}" if filter_str else None)
 
     dwd_map = {
         "Temperatur (2m)": ("t_2m", "2d_t_2m", None),
@@ -152,104 +159,71 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     if "ICON-D2" in model or "KI" in model:
         url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{folder}/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_str}.grib2.bz2")
     else: 
-        if level:
-            url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{level}_{var_str.upper()}.grib2.bz2")
-        else:
-            var_eu = var_str.replace("2d_", "")
-            url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_eu.upper()}.grib2.bz2")
+        if level: url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{level}_{var_str.upper()}.grib2.bz2")
+        else: url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_str.replace('2d_', '').upper()}.grib2.bz2")
 
     for u in url_cands:
         lons, lats, vals = download_and_extract(u, is_bz2=True)
         if lons is not None: return lons, lats, vals
-        
     return None, None, None
 
 def download_and_extract(url, is_bz2=False):
     if not url: return None, None, None
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"} 
     try:
-        resp = requests.get(url, headers=headers, timeout=12)
+        resp = requests.get(url, headers={"User-Agent": "Mozilla"}, timeout=8)
         if resp.status_code != 200: return None, None, None
         
         data = bz2.decompress(resp.content) if is_bz2 else resp.content
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f:
-            f.write(data)
-            temp_path = f.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f: f.write(data); temp_path = f.name
             
         ds = xr.open_dataset(temp_path, engine='cfgrib')
-        
         if ds['longitude'].max() > 180:
-            ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
-            ds = ds.sortby('longitude')
+            ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180)).sortby('longitude')
         
-        possible_vars = ['t2m', '2t', 't', 'd2m', '2d', 'vmax_10m', 'gust', 'tp', 'tot_prec', 'fi', 'z', 'gh', 'cape', 'cape_ml']
-        actual_var = next((v for v in possible_vars if v in ds.variables), list(ds.data_vars)[0])
-            
-        vals = ds[actual_var].values
-        lats, lons = ds['latitude'].values, ds['longitude'].values
+        act_var = next((v for v in ['t2m','2t','t','d2m','2d','vmax_10m','gust','tp','tot_prec','fi','z','gh','cape','cape_ml'] if v in ds.variables), list(ds.data_vars)[0])
+        vals, lats, lons = ds[act_var].values, ds['latitude'].values, ds['longitude'].values
         
-        pmsl_vals = None
-        pmsl_names = ['prmsl', 'pmsl', 'msl']
-        for p in pmsl_names:
-            if p in ds.variables: pmsl_vals = ds[p].values.squeeze()
+        pmsl_vals = next((ds[p].values.squeeze() for p in ['prmsl', 'pmsl', 'msl'] if p in ds.variables), None)
         
-        # Sicherstellen, dass die Arrays strikt 2D bleiben (Fix für den TypeError)
         vals = np.squeeze(vals)
         while vals.ndim > 2: vals = vals[0]
-        
         if lons.ndim == 1: lons, lats = np.meshgrid(lons, lats)
         while lons.ndim > 2: lons, lats = lons[0], lats[0]
             
         ds.close(); os.remove(temp_path)
-        
         if pmsl_vals is not None:
             pmsl_vals = np.squeeze(pmsl_vals)
             while pmsl_vals.ndim > 2: pmsl_vals = pmsl_vals[0]
             return lons, lats, (vals, pmsl_vals)
-            
         return lons, lats, vals
-    except Exception:
-        return None, None, None
+    except Exception: return None, None, None
 
 # --- KI DOWNSCALING ---
 def apply_ai_downscaling(lons, lats, t2m, td2m):
-    t2m_safe, td2m_safe = np.nan_to_num(t2m, nan=np.nanmean(t2m)), np.nan_to_num(td2m, nan=np.nanmean(td2m))
-    t2m_high, td2m_high = ndimage.zoom(t2m_safe, 2.2, order=1), ndimage.zoom(td2m_safe, 2.2, order=1)
-    lons_high, lats_high = ndimage.zoom(lons, 2.2, order=1), ndimage.zoom(lats, 2.2, order=1)
+    t2m_s, td2m_s = np.nan_to_num(t2m, nan=np.nanmean(t2m)), np.nan_to_num(td2m, nan=np.nanmean(td2m))
+    t2m_h, td2m_h = ndimage.zoom(t2m_s, 2.2, order=1), ndimage.zoom(td2m_s, 2.2, order=1)
+    lons_h, lats_h = ndimage.zoom(lons, 2.2, order=1), ndimage.zoom(lats, 2.2, order=1)
     
-    t2m_c, td2m_c = np.clip(t2m_high, -50, 50), np.clip(td2m_high, -50, 50)
-    e_vapor = np.exp((17.625 * td2m_c) / (243.04 + td2m_c))
-    e_sat = np.exp((17.625 * t2m_c) / (243.04 + t2m_c))
-    rh = np.clip(100.0 * (e_vapor / e_sat), 0, 100)
-    lapse_rate = (9.8 - 4.8 * (rh / 100.0)) / 1000.0 
-    
+    t2m_c, td2m_c = np.clip(t2m_h, -50, 50), np.clip(td2m_h, -50, 50)
+    rh = np.clip(100.0 * (np.exp((17.625 * td2m_c) / (243.04 + td2m_c)) / np.exp((17.625 * t2m_c) / (243.04 + t2m_c))), 0, 100)
     np.random.seed(42) 
-    terrain_diff = ndimage.gaussian_filter(np.random.normal(0, 1, t2m_high.shape), sigma=3) * 60.0 
-    t2m_downscaled = t2m_high - (lapse_rate * terrain_diff)
-    
-    t2m_downscaled[ndimage.zoom(np.isnan(t2m).astype(float), 2.2, order=0) > 0.5] = np.nan
-    return lons_high, lats_high, t2m_downscaled
+    t2m_down = t2m_h - (((9.8 - 4.8 * (rh / 100.0)) / 1000.0) * (ndimage.gaussian_filter(np.random.normal(0, 1, t2m_h.shape), sigma=3) * 60.0))
+    t2m_down[ndimage.zoom(np.isnan(t2m).astype(float), 2.2, order=0) > 0.5] = np.nan
+    return lons_h, lats_h, t2m_down
 
 # --- PARAMETER-LOGIK ---
-def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_choice, show_pmsl=False):
+def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pmsl=False):
     pmsl_data = None
-    
     if show_pmsl and "GFS" not in model_type: 
         _, _, p_raw = get_raw_grib(run_time, forecast_hour, model_type, "PMSL")
-        if p_raw is not None: 
-            p_raw = np.squeeze(p_raw)
-            if p_raw.ndim > 2: p_raw = p_raw[0]
-            pmsl_data = p_raw / 100.0 
+        if p_raw is not None: pmsl_data = p_raw / 100.0 
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
-    
     if isinstance(vals, tuple):
         vals, p_raw = vals
         if show_pmsl: pmsl_data = p_raw / 100.0
-        
     if vals is None: return None, None, None, "", None
     
-    # Finaler 2D-Schutz
     vals = np.squeeze(vals)
     if vals.ndim > 2: vals = vals[0]
 
@@ -257,12 +231,9 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_
     if "Temp" in param_name or param_name == "Taupunkt (2m)":
         vals = vals - 273.15
         title = "Temperatur in °C"
-        
         if model_type == "KI-Downscaling (1x1km)":
             _, _, td2m = get_raw_grib(run_time, forecast_hour, model_type, "Taupunkt (2m)")
-            if td2m is not None:
-                td2m = td2m - 273.15
-                lons, lats, vals = apply_ai_downscaling(lons, lats, vals, td2m)
+            if td2m is not None: lons, lats, vals = apply_ai_downscaling(lons, lats, vals, td2m - 273.15)
     elif "Windböen" in param_name:
         vals = vals * 3.6 
         title = "Windböen in km/h"
@@ -273,8 +244,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_
             _, _, vals_h1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)")
             if isinstance(vals_h1, tuple): vals_h1 = vals_h1[0]
             if vals_h1 is not None: vals = np.clip(vals - vals_h1, 0, None)
-        else:
-            vals = np.zeros_like(vals)
+        else: vals = np.zeros_like(vals)
         title = "Regenrate in mm/h"
     elif "Geopot" in param_name:
         vals = vals / 9.80665 / 10.0 
@@ -284,13 +254,12 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_
         
     return lons, lats, vals, title, pmsl_data
 
-# --- KARTE ZEICHNEN ---
+# --- OPTIMIERTE KARTE ZEICHNEN ---
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None, show_numbers=False):
     world, bundeslaender = load_borders()
     
-    sorted_conf = sorted(config_list, key=lambda x: x['value'])
-    levels = [c['value'] for c in sorted_conf]
-    colors = [c['color'] for c in sorted_conf]
+    levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
+    colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
     min_val, max_val = min(levels), max(levels)
     if max_val == min_val: max_val = min_val + 1 
     
@@ -300,10 +269,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     fig, ax = plt.subplots(figsize=(10, 10))
     fig.patch.set_facecolor('#0E1117'); ax.set_facecolor('#0E1117')
     
-    # Fokus / Zoom der Karte
-    if region in REGIONS:
-        ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
-        ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
+    if region in REGIONS: ax.set_xlim(REGIONS[region][0], REGIONS[region][1]); ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
     if len(levels) > 1:
         karte = ax.contourf(lons, lats, data, levels=np.linspace(min_val, max_val, 150), cmap=smooth_cmap, extend='both', alpha=0.95)
@@ -315,53 +281,41 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='black', linewidths=1.2, alpha=0.8)
         ax.clabel(iso, inline=True, fontsize=10, fmt='%d', colors='black')
 
-    # Dynamische Zahlen auf der Karte (2km, 5km, 10km)
+    # SCHNELLE VEKTOR-BASIERTE ZAHLEN-DARSTELLUNG (Fix für Ruckeln)
     if show_numbers:
         target_km = 10 if region == "Europa" else (5 if region == "Deutschland" else 2)
-        
-        # Ungefähre Berechnung der Pixelgröße (Abstand zwischen Längengraden)
         try:
             dy = abs(lats[1, 0] - lats[0, 0]) * 111.0
-            if dy < 0.01: dy = abs(lats[0, 1] - lats[0, 0]) * 111.0
-            if dy < 0.01: dy = 2.2 # Fallback
-        except:
-            dy = 2.2
-            
+            if dy < 0.01: dy = 2.2
+        except: dy = 2.2
         step = max(1, int(target_km / dy))
         
-        xmin, xmax = ax.get_xlim()
-        ymin, ymax = ax.get_ylim()
+        xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         
-        for i in range(0, data.shape[0], step):
-            for j in range(0, data.shape[1], step):
-                lon_val = lons[i, j]
-                lat_val = lats[i, j]
-                
-                # Nur innerhalb der sichtbaren Karte zeichnen (spart enorm Zeit)
-                if xmin <= lon_val <= xmax and ymin <= lat_val <= ymax:
-                    val = data[i, j]
-                    if np.isnan(val): continue
-                    
-                    # Wert filtern und formatieren
-                    if "Niederschlag" in legend_title or "Regen" in legend_title:
-                        if val < 0.1: continue
-                        txt = f"{val:.1f}"
-                    elif "CAPE" in legend_title:
-                        if val < 50: continue
-                        txt = f"{val:.0f}"
-                    else:
-                        txt = f"{val:.0f}"
-                        
-                    ax.text(lon_val, lat_val, txt, fontsize=7, color='black',
-                            ha='center', va='center',
-                            path_effects=[path_effects.withStroke(linewidth=1.5, foreground='white')])
+        # NumPy Filterung statt ewiger Schleife
+        mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
+        grid_mask = np.zeros_like(mask, dtype=bool)
+        grid_mask[::step, ::step] = True
+        final_mask = mask & grid_mask
+        
+        valid_lons, valid_lats, valid_data = lons[final_mask], lats[final_mask], data[final_mask]
+        
+        for lon_val, lat_val, val in zip(valid_lons, valid_lats, valid_data):
+            if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
+            if "CAPE" in legend_title and val < 50: continue
+            txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
+            ax.text(lon_val, lat_val, txt, fontsize=8, color='black', ha='center', va='center', path_effects=[path_effects.withStroke(linewidth=1.5, foreground='white')])
 
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.8)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=1.0)
-        
     ax.axis('off')
     ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.5, f"{model_type} | {map_title_time}", color='white', fontsize=10, bbox=dict(facecolor='#0E1117', alpha=0.7, edgecolor='none'))
-    return fig
+    
+    # Speichern als Bytes für sofortiges Caching
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, facecolor='#0E1117')
+    plt.close(fig)
+    return buf.getvalue()
 
 # --- BENUTZEROBERFLÄCHE (UI) ---
 st.sidebar.header("⚙️ Allgemeine Einstellungen")
@@ -372,14 +326,12 @@ run_label = st.sidebar.selectbox("Modelllauf:", list(available_runs.keys()))
 run_time = available_runs[run_label]
 
 param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE"]
-
 if "KI-Downscaling" in model_choice: param_list = ["Temperatur (2m)"]
 elif "AIFS" in model_choice: param_list = ["Temperatur (2m)", "Windböen 10m", "500 hPa Geopot. Height", "850 hPa Temp."]
 param_choice = st.sidebar.selectbox("Parameter:", param_list)
 
 region_options = list(REGIONS.keys())
-if "D2" in model_choice or "KI" in model_choice:
-    region_options.remove("Europa") 
+if "D2" in model_choice or "KI" in model_choice: region_options.remove("Europa") 
 region_choice = st.sidebar.selectbox("Region:", region_options, index=region_options.index("Deutschland") if "Deutschland" in region_options else 0)
 
 show_pmsl = st.sidebar.checkbox("Isobaren (Luftdruck) in Schwarz anzeigen", value=True) if param_choice == "850 hPa Temp." else False
@@ -389,21 +341,19 @@ show_numbers = False
 if allow_numbers:
     show_numbers = st.sidebar.checkbox("Zahlenwerte auf Karte anzeigen", value=False)
     if show_numbers:
-        st.sidebar.info("💡 Die Rasterauflösung der Zahlen (2km, 5km, 10km) passt sich automatisch der gewählten Region an.")
+        st.sidebar.info("💡 Die Rasterauflösung (2km, 5km, 10km) passt sich automatisch der gewählten Region an.")
 
 st.sidebar.divider()
 
-if param_choice not in st.session_state.config: st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
-
 with st.sidebar.expander(f"🎨 Farben für {param_choice}", expanded=False):
+    if param_choice not in st.session_state.config: st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
     new_config = []
     for i, item in enumerate(st.session_state.config[param_choice]):
         col1, col2, col3 = st.columns([2, 2, 1])
         with col1: val = st.number_input("Wert", value=float(item['value']), step=1.0, key=f"val_{param_choice}_{i}", label_visibility="collapsed")
         with col2: color = st.color_picker("Farbe", value=item['color'], key=f"col_{param_choice}_{i}", label_visibility="collapsed")
         with col3:
-            if st.button("🗑️", key=f"del_{param_choice}_{i}"):
-                st.session_state.config[param_choice].pop(i); st.rerun()
+            if st.button("🗑️", key=f"del_{param_choice}_{i}"): st.session_state.config[param_choice].pop(i); st.rerun()
         new_config.append({"value": val, "color": color})
     st.session_state.config[param_choice] = new_config
     c1, c2 = st.columns(2)
@@ -411,25 +361,83 @@ with st.sidebar.expander(f"🎨 Farben für {param_choice}", expanded=False):
         if st.button("➕ Neu"): st.session_state.config[param_choice].append({"value": 0.0, "color": "#ffffff"}); st.rerun()
     with c2:
         if st.button("💾 Speichern"): save_config(st.session_state.config)
+        
 st.sidebar.divider()
 
-# --- HAUPTBEREICH ---
+# INFO BEREICH
+with st.sidebar.expander("ℹ️ Info: Modell-Zeiten & Updates"):
+    st.markdown("""
+    **Wann ist welcher Lauf online?**
+    Die App zeigt Läufe erst an, wenn sie komplett und sicher auf den Servern liegen.
+    * **ICON-D2:** ca. 2,0 Stunden nach Laufzeit (z.B. der 12Z Lauf ab ca. 14:00Z)
+    * **ICON-EU:** ca. 3,0 Stunden nach Laufzeit
+    * **GFS (USA):** ca. 5,0 Stunden nach Laufzeit
+    * **AIFS (KI):** ca. 9,5 Stunden nach Laufzeit
+    """)
+
+# --- HAUPTBEREICH (Steuerung & Cache) ---
 st.info(f"Basis-Lauf: **{run_label}**")
 
 max_hours = {"ICON-D2 (2.2km)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
-forecast_hour = st.slider("Vorhersagestunde", min_value=0, max_value=max_hours[model_choice], value=0, step=1, format="+%dh")
+max_h = max_hours[model_choice]
 
-time_local = (run_time + timedelta(hours=forecast_hour)).astimezone(ZoneInfo("Europe/Berlin"))
-st.success(f"**Gültig für:** +{forecast_hour}h ➔ {time_local.strftime('%d.%m.%Y um %H:00')} Uhr (MEZ/MESZ)")
+# Checken, ob Session-State-Stunde noch im Rahmen des Modells ist
+st.session_state.f_hour = min(st.session_state.f_hour, max_h)
 
-if "AIFS" in model_choice: st.info("ℹ️ AIFS lädt das gesamte GRIB2-Archiv. Die Generierung kann einige Sekunden länger dauern.")
+def dec_hour(): st.session_state.f_hour = max(0, st.session_state.f_hour - 1)
+def inc_hour(): st.session_state.f_hour = min(max_h, st.session_state.f_hour + 1)
 
-if st.button("🚀 Karte rendern", type="primary"):
-    with st.spinner("Lade Daten und rendere Karte..."):
-        lons, lats, data, title, pmsl = load_parameter_data(run_time, forecast_hour, param_choice, model_choice, region_choice, show_pmsl)
+# Navigations-Knöpfe und Schieberegler
+col_back, col_slide, col_for = st.columns([1, 4, 1])
+with col_back:
+    st.write("")
+    if st.button("⬅️ Zurück", use_container_width=True): dec_hour()
+with col_slide:
+    st.session_state.f_hour = st.slider("Vorhersagestunde", min_value=0, max_value=max_h, value=st.session_state.f_hour, step=1, format="+%dh", label_visibility="collapsed")
+with col_for:
+    st.write("")
+    if st.button("Vor ➡️", use_container_width=True): inc_hour()
+
+time_local = (run_time + timedelta(hours=st.session_state.f_hour)).astimezone(ZoneInfo("Europe/Berlin"))
+st.success(f"**Gültig für:** +{st.session_state.f_hour}h ➔ {time_local.strftime('%d.%m.%Y um %H:00')} Uhr (MEZ/MESZ)")
+
+# Preload Button
+cache_step = 6 if "AIFS" in model_choice or "GFS" in model_choice else (3 if "EU" in model_choice else 1)
+preload_max = 48 if model_choice != "ICON-D2 (2.2km)" else max_h # Begrenzung auf 48h für Globalmodelle um Streamlit-Timeouts zu verhindern
+
+col_btn, _ = st.columns([1, 1])
+with col_btn:
+    if st.button("⚡ Nächste 48h vorladen (Cache)"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        steps_to_load = list(range(0, min(max_h, preload_max) + 1, cache_step))
+        for idx, hr in enumerate(steps_to_load):
+            c_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{hr}_{show_pmsl}_{show_numbers}"
+            status_text.text(f"Lade Karte +{hr}h ... ({idx+1}/{len(steps_to_load)})")
+            if c_key not in st.session_state.map_cache:
+                lons, lats, data, title, pmsl = load_parameter_data(run_time, hr, param_choice, model_choice, show_pmsl)
+                if lons is not None:
+                    t_str = (run_time + timedelta(hours=hr)).astimezone(ZoneInfo("Europe/Berlin")).strftime('%d.%m. %H:00')
+                    st.session_state.map_cache[c_key] = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{hr}h | {t_str} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
+            progress_bar.progress((idx + 1) / len(steps_to_load))
+        status_text.success("Alle Karten erfolgreich geladen! Du kannst nun blitzschnell umschalten.")
+
+# --- RENDERN (Echtzeit aus Cache oder Download) ---
+current_cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{st.session_state.f_hour}_{show_pmsl}_{show_numbers}"
+
+if current_cache_key in st.session_state.map_cache:
+    # Wenn im Cache, sofort anzeigen!
+    st.image(st.session_state.map_cache[current_cache_key], use_container_width=True)
+else:
+    # Wenn nicht im Cache, kurz laden und abspeichern
+    with st.spinner("Lade & Rendere Karte... (wird für späteres Aufrufen gespeichert)"):
+        lons, lats, data, title, pmsl = load_parameter_data(run_time, st.session_state.f_hour, param_choice, model_choice, show_pmsl)
         if lons is not None:
-            fig = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_local.strftime('%d.%m. %H:00')} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
-            st.pyplot(fig)
-            st.toast("Erfolgreich generiert!", icon="✅")
+            t_str = time_local.strftime('%d.%m. %H:00')
+            # Erstelle Bild und lege es in den Cache
+            img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{st.session_state.f_hour}h | {t_str} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
+            st.session_state.map_cache[current_cache_key] = img_bytes
+            st.image(img_bytes, use_container_width=True)
         else:
-            st.error("Ein Datensatz für diesen Parameter ist auf den Servern für diese Stunde nicht (mehr/noch nicht) verfügbar.")
+            st.error("Ein Datensatz für diesen Parameter ist auf den Servern für diese Stunde nicht verfügbar.")
