@@ -9,7 +9,6 @@ import numpy as np
 import matplotlib
 # Zwingt Matplotlib in den Server-Modus (viel schneller, da keine GUI geladen wird)
 matplotlib.use('Agg') 
-import matplotlib.subplots
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patheffects as path_effects
@@ -158,7 +157,6 @@ def process_single_map(args):
 
 # --- MULTIPROCESSING STARTEN ---
 if __name__ == '__main__':
-    # Baut eine Liste mit allen Aufgaben (98 Karten)
     tasks = []
     for param in PARAMS_TO_RENDER:
         for hr in FORECAST_HOURS:
