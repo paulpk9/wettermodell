@@ -157,56 +157,108 @@
     ],
     "850 hPa Temp.": [
         {
-            "value": -25.0,
-            "color": "#9a00a9"
-        },
-        {
             "value": -20.0,
-            "color": "#4b0066"
+            "color": "#0a0076"
         },
         {
-            "value": -15.0,
-            "color": "#080066"
+            "value": -18.0,
+            "color": "#0900a8"
+        },
+        {
+            "value": -16.0,
+            "color": "#0014d7"
+        },
+        {
+            "value": -14.0,
+            "color": "#005edb"
+        },
+        {
+            "value": -12.0,
+            "color": "#0087df"
         },
         {
             "value": -10.0,
-            "color": "#0600d2"
+            "color": "#00b9e7"
         },
         {
-            "value": -5.0,
-            "color": "#00acd6"
+            "value": -8.0,
+            "color": "#00d3c8"
+        },
+        {
+            "value": -6.0,
+            "color": "#00847c"
+        },
+        {
+            "value": -4.0,
+            "color": "#008460"
+        },
+        {
+            "value": -2.0,
+            "color": "#008145"
         },
         {
             "value": 0.0,
-            "color": "#0b7e00"
+            "color": "#0a8400"
         },
         {
-            "value": 5.0,
-            "color": "#b0e000"
+            "value": 2.0,
+            "color": "#2c8500"
+        },
+        {
+            "value": 4.0,
+            "color": "#569d00"
+        },
+        {
+            "value": 6.0,
+            "color": "#9fcd00"
+        },
+        {
+            "value": 8.0,
+            "color": "#d1d900"
         },
         {
             "value": 10.0,
-            "color": "#dfa100"
+            "color": "#dcbc00"
         },
         {
-            "value": 15.0,
-            "color": "#d34600"
+            "value": 12.0,
+            "color": "#d79e00"
+        },
+        {
+            "value": 14.0,
+            "color": "#dc8700"
+        },
+        {
+            "value": 16.0,
+            "color": "#d76500"
+        },
+        {
+            "value": 18.0,
+            "color": "#dc3100"
         },
         {
             "value": 20.0,
-            "color": "#a40003"
+            "color": "#dc0000"
         },
         {
-            "value": 25.0,
-            "color": "#600000"
+            "value": 22.0,
+            "color": "#ad0000"
+        },
+        {
+            "value": 24.0,
+            "color": "#960000"
+        },
+        {
+            "value": 26.0,
+            "color": "#870030"
+        },
+        {
+            "value": 28.0,
+            "color": "#7f0057"
         },
         {
             "value": 30.0,
-            "color": "#77006e"
-        },
-        {
-            "value": -30.0,
-            "color": "#ff00f5"
+            "color": "#9a009a"
         }
     ],
     "MLCAPE": [
