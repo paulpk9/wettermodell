@@ -108,5 +108,51 @@
             "value": 0.1,
             "color": "#cdedff"
         }
+    ],
+    "500 hPa Geopot. Height": [
+        {
+            "value": 500.0,
+            "color": "#6a0082"
+        },
+        {
+            "value": 510.0,
+            "color": "#0c0082"
+        },
+        {
+            "value": 520.0,
+            "color": "#1000e7"
+        },
+        {
+            "value": 530.0,
+            "color": "#0084e7"
+        },
+        {
+            "value": 540.0,
+            "color": "#00cfe6"
+        },
+        {
+            "value": 550.0,
+            "color": "#008009"
+        },
+        {
+            "value": 560.0,
+            "color": "#e5d700"
+        },
+        {
+            "value": 570.0,
+            "color": "#e85e00"
+        },
+        {
+            "value": 580.0,
+            "color": "#e40000"
+        },
+        {
+            "value": 590.0,
+            "color": "#840000"
+        },
+        {
+            "value": 600.0,
+            "color": "#7c008a"
+        }
     ]
 }
