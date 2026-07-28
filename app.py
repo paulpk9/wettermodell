@@ -96,18 +96,14 @@ def load_borders():
         f2.write(bl_r); f2_name = f2.name
     return gpd.read_file(f1_name), gpd.read_file(f2_name)
 
-# --- NEUE LOGIK: VERFÜGBARKEITS-CHECK (Lauf + Dauer + 30 Min Puffer) ---
+# --- VERFÜGBARKEITS-CHECK (Lauf + Dauer + 30 Min Puffer) ---
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
     
-    if "AIFS" in model_name: 
-        step, delay = 12, 9.5
-    elif "GFS" in model_name: 
-        step, delay = 6, 5.0
-    elif "EU" in model_name: 
-        step, delay = 6, 3.0
-    else: 
-        step, delay = 3, 2.0
+    if "AIFS" in model_name: step, delay = 12, 9.5
+    elif "GFS" in model_name: step, delay = 6, 5.0
+    elif "EU" in model_name: step, delay = 6, 3.0
+    else: step, delay = 3, 2.0
         
     effective_now = now - timedelta(hours=delay)
     latest_run = effective_now.replace(hour=(effective_now.hour // step) * step, minute=0, second=0, microsecond=0)
@@ -170,7 +166,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
 def download_and_extract(url, is_bz2=False):
     if not url: return None, None, None
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla"}, timeout=8)
+        resp = requests.get(url, headers={"User-Agent": "Mozilla"}, timeout=12)
         if resp.status_code != 200: return None, None, None
         
         data = bz2.decompress(resp.content) if is_bz2 else resp.content
@@ -281,7 +277,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='black', linewidths=1.2, alpha=0.8)
         ax.clabel(iso, inline=True, fontsize=10, fmt='%d', colors='black')
 
-    # SCHNELLE VEKTOR-BASIERTE ZAHLEN-DARSTELLUNG (Fix für Ruckeln)
+    # SCHNELLE VEKTOR-BASIERTE ZAHLEN-DARSTELLUNG
     if show_numbers:
         target_km = 10 if region == "Europa" else (5 if region == "Deutschland" else 2)
         try:
@@ -292,7 +288,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         
-        # NumPy Filterung statt ewiger Schleife
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
         grid_mask = np.zeros_like(mask, dtype=bool)
         grid_mask[::step, ::step] = True
@@ -311,7 +306,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     ax.axis('off')
     ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.5, f"{model_type} | {map_title_time}", color='white', fontsize=10, bbox=dict(facecolor='#0E1117', alpha=0.7, edgecolor='none'))
     
-    # Speichern als Bytes für sofortiges Caching
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, facecolor='#0E1117')
     plt.close(fig)
@@ -341,7 +335,7 @@ show_numbers = False
 if allow_numbers:
     show_numbers = st.sidebar.checkbox("Zahlenwerte auf Karte anzeigen", value=False)
     if show_numbers:
-        st.sidebar.info("💡 Die Rasterauflösung (2km, 5km, 10km) passt sich automatisch der gewählten Region an.")
+        st.sidebar.info("💡 Die Rasterauflösung (2km, 5km, 10km) passt sich automatisch der Region an.")
 
 st.sidebar.divider()
 
@@ -364,7 +358,6 @@ with st.sidebar.expander(f"🎨 Farben für {param_choice}", expanded=False):
         
 st.sidebar.divider()
 
-# INFO BEREICH
 with st.sidebar.expander("ℹ️ Info: Modell-Zeiten & Updates"):
     st.markdown("""
     **Wann ist welcher Lauf online?**
@@ -381,13 +374,11 @@ st.info(f"Basis-Lauf: **{run_label}**")
 max_hours = {"ICON-D2 (2.2km)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
 max_h = max_hours[model_choice]
 
-# Checken, ob Session-State-Stunde noch im Rahmen des Modells ist
 st.session_state.f_hour = min(st.session_state.f_hour, max_h)
 
 def dec_hour(): st.session_state.f_hour = max(0, st.session_state.f_hour - 1)
 def inc_hour(): st.session_state.f_hour = min(max_h, st.session_state.f_hour + 1)
 
-# Navigations-Knöpfe und Schieberegler
 col_back, col_slide, col_for = st.columns([1, 4, 1])
 with col_back:
     st.write("")
@@ -403,7 +394,7 @@ st.success(f"**Gültig für:** +{st.session_state.f_hour}h ➔ {time_local.strft
 
 # Preload Button
 cache_step = 6 if "AIFS" in model_choice or "GFS" in model_choice else (3 if "EU" in model_choice else 1)
-preload_max = 48 if model_choice != "ICON-D2 (2.2km)" else max_h # Begrenzung auf 48h für Globalmodelle um Streamlit-Timeouts zu verhindern
+preload_max = 48 if model_choice != "ICON-D2 (2.2km)" else max_h 
 
 col_btn, _ = st.columns([1, 1])
 with col_btn:
@@ -423,19 +414,16 @@ with col_btn:
             progress_bar.progress((idx + 1) / len(steps_to_load))
         status_text.success("Alle Karten erfolgreich geladen! Du kannst nun blitzschnell umschalten.")
 
-# --- RENDERN (Echtzeit aus Cache oder Download) ---
+# --- RENDERN ---
 current_cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{st.session_state.f_hour}_{show_pmsl}_{show_numbers}"
 
 if current_cache_key in st.session_state.map_cache:
-    # Wenn im Cache, sofort anzeigen!
     st.image(st.session_state.map_cache[current_cache_key], use_container_width=True)
 else:
-    # Wenn nicht im Cache, kurz laden und abspeichern
-    with st.spinner("Lade & Rendere Karte... (wird für späteres Aufrufen gespeichert)"):
+    with st.spinner("Lade & Rendere Karte..."):
         lons, lats, data, title, pmsl = load_parameter_data(run_time, st.session_state.f_hour, param_choice, model_choice, show_pmsl)
         if lons is not None:
             t_str = time_local.strftime('%d.%m. %H:00')
-            # Erstelle Bild und lege es in den Cache
             img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{st.session_state.f_hour}h | {t_str} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
             st.session_state.map_cache[current_cache_key] = img_bytes
             st.image(img_bytes, use_container_width=True)
