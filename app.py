@@ -21,20 +21,15 @@ st.set_page_config(page_title="Profi-Wetterterminal", page_icon="🌤️", layou
 
 st.markdown("""
     <style>
-        /* Moderne Schriftart */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
         html, body, [class*="css"] {
             font-family: 'Inter', sans-serif !important;
         }
-        
-        /* Abgerundete Ecken & Schatten für Bilder (die Karte) */
         img {
             border-radius: 16px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
             transition: all 0.3s ease;
         }
-        
-        /* Schwebender Banner (Glassmorphism) */
         .glass-banner {
             background: rgba(255, 255, 255, 0.05);
             backdrop-filter: blur(12px);
@@ -50,8 +45,6 @@ st.markdown("""
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
             letter-spacing: 0.5px;
         }
-        
-        /* Schieberegler modernisieren */
         .stSlider > div > div > div {
             background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%);
         }
@@ -158,7 +151,15 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     dm = {"Temperatur (2m)": ("t_2m", "2d_t_2m", None), "Taupunkt (2m)": ("td_2m", "2d_td_2m", None), "Windböen 10m": ("vmax_10m", "2d_vmax_10m", None), "Akk. Niederschlag (mm)": ("tot_prec", "2d_tot_prec", None), "Niederschlagsrate (mm/h)": ("tot_prec", "2d_tot_prec", None), "500 hPa Geopot. Height": ("fi", "fi", "500"), "850 hPa Temp.": ("t", "t", "850"), "MLCAPE": ("cape_ml", "cape_ml", None), "PMSL": ("pmsl", "pmsl", None)}
     if param_name not in dm: return None, None, None
     fld, var, lvl = dm[param_name]
-    u = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{fld}/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var}.grib2.bz2" if "D2" in model or "KI" in model else (f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2" if lvl else f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var.replace('2d_', '').upper()}.grib2.bz2")
+    
+    # KORREKTUR DER DWD-URLS (Beachtet nun auch die pressure-levels bei ICON-D2 korrekt!)
+    if lvl: 
+        if "D2" in model: u = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{fld}/icon-d2_germany_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2"
+        else: u = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2"
+    else: 
+        if "D2" in model: u = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{fld}/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var}.grib2.bz2"
+        else: u = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var.replace('2d_', '').upper()}.grib2.bz2"
+        
     return download_and_extract(u, is_bz2=True)
 
 def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pmsl=False):
@@ -194,9 +195,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     
     cmap = mcolors.LinearSegmentedColormap.from_list("custom", list(zip([(v - min_v) / (max_v - min_v) for v in levels], colors)))
     
-    # 0 padding = Randlose Karte!
     fig, ax = plt.subplots(figsize=(10, 10))
-    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
     
     # Standard Darkmode-Hintergrund
     fig.patch.set_facecolor('#0E1117')
@@ -206,7 +205,12 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
     karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=0.95)
     
-    # Subtile Grenzen (Korrigiert auf Matplotlib-Standard)
+    # KORREKTUR 1: Die Farbskala ist wieder da (Horizontal unten)
+    cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.046, pad=0.04, ticks=levels)
+    cbar.set_label(legend_title, color='white', size=12)
+    cbar.ax.xaxis.set_tick_params(color='white', labelcolor='white')
+    
+    # Subtile Grenzen
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.2)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=0.4)
 
@@ -231,12 +235,10 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
             if "CAPE" in legend_title and val < 50: continue
             txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
             
-            # KORREKTUR: Tupel für die Text-Umrandung (Weiß mit 80% Deckkraft) anstatt CSS-String
             ax.text(lon_val, lat_val, txt, fontsize=9, fontfamily='sans-serif', fontweight='bold', color='#111', ha='center', va='center', path_effects=[path_effects.withStroke(linewidth=2, foreground=(1.0, 1.0, 1.0, 0.8))])
 
     ax.axis('off')
     
-    # KORREKTUR: Tupel für die Label-Umrandung (Schwarz mit 80% Deckkraft) anstatt CSS-String
     txt = ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.4, f"{model_type} | {map_title_time}", color='white', fontsize=12, fontweight='bold', fontfamily='sans-serif')
     txt.set_path_effects([path_effects.withStroke(linewidth=3, foreground=(0.0, 0.0, 0.0, 0.8))])
     
@@ -286,7 +288,6 @@ tz_berlin = ZoneInfo("Europe/Berlin")
 start_time_local = run_time.astimezone(tz_berlin)
 end_time_local = start_time_local + timedelta(hours=max_h)
 
-# Der magische Echtzeit-Schieberegler
 selected_datetime = st.slider(
     "Zeitpunkt wählen:", 
     min_value=start_time_local, 
@@ -306,10 +307,12 @@ st.markdown(f"""
     </div>
 """, unsafe_allow_html=True)
 
-cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}"
+# KORREKTUR 2: Der Hash der Farbskala wird nun in den Cache-Key geschrieben. 
+# Dadurch wird die Karte bei JEDER Änderung eines Farbwerts SOFORT neu gerendert!
+config_hash = hash(str(st.session_state.config[param_choice]))
+cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}_{config_hash}"
 
 if cache_key in st.session_state.map_cache:
-    # use_column_width wird genutzt statt dem veralteten use_container_width
     st.image(st.session_state.map_cache[cache_key], use_container_width=True)
 else:
     if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary", use_container_width=True):
