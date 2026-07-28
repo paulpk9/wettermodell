@@ -158,55 +158,55 @@
     "850 hPa Temp.": [
         {
             "value": -25.0,
-            "color": "#790086"
+            "color": "#9a00a9"
         },
         {
             "value": -20.0,
-            "color": "#540090"
+            "color": "#4b0066"
         },
         {
             "value": -15.0,
-            "color": "#09008d"
+            "color": "#080066"
         },
         {
             "value": -10.0,
-            "color": "#001ce0"
+            "color": "#0600d2"
         },
         {
             "value": -5.0,
-            "color": "#00a2d6"
+            "color": "#00acd6"
         },
         {
             "value": 0.0,
-            "color": "#0a8400"
+            "color": "#0b7e00"
         },
         {
             "value": 5.0,
-            "color": "#73e000"
+            "color": "#b0e000"
         },
         {
             "value": 10.0,
-            "color": "#dfcd00"
+            "color": "#dfa100"
         },
         {
             "value": 15.0,
-            "color": "#d36f00"
+            "color": "#d34600"
         },
         {
             "value": 20.0,
-            "color": "#d80000"
+            "color": "#a40003"
         },
         {
             "value": 25.0,
-            "color": "#830000"
+            "color": "#600000"
         },
         {
             "value": 30.0,
-            "color": "#97008d"
+            "color": "#77006e"
         },
         {
             "value": -30.0,
-            "color": "#ca00c1"
+            "color": "#ff00f5"
         }
     ],
     "MLCAPE": [
