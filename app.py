@@ -108,7 +108,6 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     
     # --- 1. AIFS (ECMWF KI) Logik ---
     if "AIFS" in model:
-        # AIFS gibt es meist in 6h Schritten.
         url = f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{hour_str}h-oper-fc.grib2"
         return download_and_extract(url)
 
@@ -120,7 +119,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
             "Taupunkt (2m)": "var_DPT=on&lev_2_m_above_ground=on",
             "Windböen 10m": "var_GUST=on&lev_surface=on",
             "Akk. Niederschlag (mm)": "var_APCP=on&lev_surface=on",
-            "Niederschlagsrate (mm/h)": "var_APCP=on&lev_surface=on", # Wir laden Akk. und subtrahieren später
+            "Niederschlagsrate (mm/h)": "var_APCP=on&lev_surface=on",
             "500 hPa Geopot. Height": "var_HGT=on&lev_500_mb=on",
             "850 hPa Temp.": "var_TMP=on&lev_850_mb=on",
             "MLCAPE": "var_CAPE=on&lev_surface=on",
@@ -128,7 +127,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         }
         
         filter_str = var_map.get(param_name, "")
-        if param_name == "850 hPa Temp.": filter_str += "&" + var_map["PMSL"] # Luftdruck gleich mitladen
+        if param_name == "850 hPa Temp.": filter_str += "&" + var_map["PMSL"]
         
         url = f"{base_url}&{filter_str}" if filter_str else None
         return download_and_extract(url)
@@ -148,16 +147,11 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     
     if param_name not in dwd_map: return None, None, None
     folder, var_str, level = dwd_map[param_name]
-    
-    # Sonderfall Isobaren
-    if param_name == "850 hPa Temp.":
-        # Hier laden wir nur die Temp., PMSL wird im Parameter-Handler gesondert geladen
-        pass
         
     url_cands = []
     if "ICON-D2" in model or "KI" in model:
         url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{folder}/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var_str}.grib2.bz2")
-    else: # ICON-EU
+    else: 
         if level:
             url_cands.append(f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{folder}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{level}_{var_str.upper()}.grib2.bz2")
         else:
@@ -183,14 +177,18 @@ def download_and_extract(url, is_bz2=False):
             
         ds = xr.open_dataset(temp_path, engine='cfgrib')
         
-        # Dynamisch die richtigen Variablen finden (verschiedene Modelle nutzen verschiedene Namen)
+        # --- DER GREENWICH-FIX: 0-360 auf -180..180 verschieben ---
+        if ds['longitude'].max() > 180:
+            ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
+            ds = ds.sortby('longitude')
+        
+        # Dynamisch die richtigen Variablen finden
         possible_vars = ['t2m', '2t', 't', 'd2m', '2d', 'vmax_10m', 'gust', 'tp', 'tot_prec', 'fi', 'z', 'gh', 'cape', 'cape_ml']
         actual_var = next((v for v in possible_vars if v in ds.variables), list(ds.data_vars)[0])
             
         vals = ds[actual_var].values
         lats, lons = ds['latitude'].values, ds['longitude'].values
         
-        # Luftdruck (PMSL) in zweiter Variable sichern, falls GFS beides kombiniert hat
         pmsl_vals = None
         pmsl_names = ['prmsl', 'pmsl', 'msl']
         for p in pmsl_names:
@@ -204,7 +202,7 @@ def download_and_extract(url, is_bz2=False):
         
         if pmsl_vals is not None:
             while pmsl_vals.ndim > 2: pmsl_vals = pmsl_vals[0]
-            return lons, lats, (vals, pmsl_vals) # Tuple wenn 2 Variablen
+            return lons, lats, (vals, pmsl_vals)
             
         return lons, lats, vals
     except Exception:
@@ -233,13 +231,12 @@ def apply_ai_downscaling(lons, lats, t2m, td2m):
 def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pmsl=False):
     pmsl_data = None
     
-    if show_pmsl and "GFS" not in model_type: # GFS holt PMSL in einem Abwasch
+    if show_pmsl and "GFS" not in model_type: 
         _, _, p_raw = get_raw_grib(run_time, forecast_hour, model_type, "PMSL")
         if p_raw is not None: pmsl_data = p_raw / 100.0 
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
     
-    # GFS Entpacken (Falls Tuple zurückkam)
     if isinstance(vals, tuple):
         vals, p_raw = vals
         if show_pmsl: pmsl_data = p_raw / 100.0
@@ -258,7 +255,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pm
                 lons, lats, vals = apply_ai_downscaling(lons, lats, vals, td2m)
                 
     elif "Windböen" in param_name:
-        vals = vals * 3.6 # m/s in km/h
+        vals = vals * 3.6 
         title = "Windböen in km/h"
         
     elif param_name == "Akk. Niederschlag (mm)":
@@ -275,7 +272,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pm
         title = "Regenrate in mm/h"
         
     elif "Geopot" in param_name:
-        vals = vals / 9.80665 / 10.0 # gpdm
+        vals = vals / 9.80665 / 10.0 
         title = "Geopotential (gpdm)"
         
     elif param_name == "MLCAPE":
@@ -306,15 +303,12 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
 
     if pmsl_data is not None:
-        # Isobaren jetzt in Schwarz
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='black', linewidths=1.2, alpha=0.8)
         ax.clabel(iso, inline=True, fontsize=10, fmt='%d', colors='black')
 
-    # Alle Grenzen jetzt in Weiß
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.8)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=1.0)
     
-    # Regionen-Zoom
     if region in REGIONS:
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
@@ -331,16 +325,14 @@ available_runs = get_available_runs(model_choice)
 run_label = st.sidebar.selectbox("Modelllauf:", list(available_runs.keys()))
 run_time = available_runs[run_label]
 
-# Parameter-Filter Logik
 param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE"]
 if "KI" in model_choice: param_list = ["Temperatur (2m)"]
 if "AIFS" in model_choice: param_list = ["Temperatur (2m)", "Windböen 10m", "500 hPa Geopot. Height", "850 hPa Temp."]
 param_choice = st.sidebar.selectbox("Parameter:", param_list)
 
-# Regionen-Filter Logik
 region_options = list(REGIONS.keys())
 if "D2" in model_choice or "KI" in model_choice:
-    region_options.remove("Europa") # D2 hat kein Europa
+    region_options.remove("Europa") 
 region_choice = st.sidebar.selectbox("Region:", region_options, index=region_options.index("Deutschland") if "Deutschland" in region_options else 0)
 
 show_pmsl = st.sidebar.checkbox("Isobaren (Luftdruck) in Schwarz anzeigen", value=True) if param_choice == "850 hPa Temp." else False
@@ -369,7 +361,6 @@ st.sidebar.divider()
 # --- HAUPTBEREICH ---
 st.info(f"Basis-Lauf: **{run_label}**")
 
-# Dynamische Stundenanzahl je nach Modell
 max_hours = {"ICON-D2 (2.2km)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
 forecast_hour = st.slider("Vorhersagestunde", min_value=0, max_value=max_hours[model_choice], value=0, step=1, format="+%dh")
 
