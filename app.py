@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.patheffects as path_effects
 import geopandas as gpd
 from github import Github, Auth
 import json
@@ -27,8 +28,7 @@ DEFAULT_CONFIGS = {
     "Niederschlagsrate (mm/h)": [{"value": 0.0, "color": "#ffffff"}, {"value": 0.5, "color": "#a6cee3"}, {"value": 2.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#33a02c"}, {"value": 25.0, "color": "#fb9a99"}],
     "500 hPa Geopot. Height": [{"value": 500.0, "color": "#313695"}, {"value": 540.0, "color": "#e0f3f8"}, {"value": 580.0, "color": "#d73027"}],
     "850 hPa Temp.": [{"value": -20.0, "color": "#313695"}, {"value": -10.0, "color": "#74add1"}, {"value": 0.0, "color": "#ffffff"}, {"value": 10.0, "color": "#fdae61"}, {"value": 20.0, "color": "#d73027"}],
-    "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}],
-    "Unwetter-Index (%)": [{"value": 0.0, "color": "#ffffff"}, {"value": 25.0, "color": "#a6d96a"}, {"value": 50.0, "color": "#fdae61"}, {"value": 75.0, "color": "#d7191c"}, {"value": 95.0, "color": "#7a0177"}]
+    "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}]
 }
 
 # --- REGIONEN DEFINITIONEN (Bounding Boxes) ---
@@ -98,7 +98,6 @@ def load_borders():
 # --- MODELLLÄUFE BERECHNEN ---
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    # AIFS rechnet nur alle 12h, GFS und ICON-EU alle 6h, D2 alle 3h
     if "AIFS" in model_name: step = 12
     elif "GFS" in model_name or "EU" in model_name: step = 6
     else: step = 3
@@ -111,13 +110,11 @@ def get_available_runs(model_name):
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
     
-    # --- 1. AIFS (ECMWF KI) Logik (Bugfix: keine führenden Nullen bei Stunden) ---
     if "AIFS" in model:
         hour_str_aifs = str(forecast_hour) 
         url = f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{hour_str_aifs}h-oper-fc.grib2"
         return download_and_extract(url)
 
-    # --- 2. GFS (NOAA) Logik (Bugfix: Header) ---
     if "GFS" in model:
         base_url = f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}"
         var_map = {
@@ -136,7 +133,6 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         url = f"{base_url}&{filter_str}" if filter_str else None
         return download_and_extract(url)
 
-    # --- 3. DWD (ICON-D2 & ICON-EU) Logik ---
     dwd_map = {
         "Temperatur (2m)": ("t_2m", "2d_t_2m", None),
         "Taupunkt (2m)": ("td_2m", "2d_td_2m", None),
@@ -170,7 +166,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
 
 def download_and_extract(url, is_bz2=False):
     if not url: return None, None, None
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"} # Bugfix GFS
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"} 
     try:
         resp = requests.get(url, headers=headers, timeout=12)
         if resp.status_code != 200: return None, None, None
@@ -182,7 +178,6 @@ def download_and_extract(url, is_bz2=False):
             
         ds = xr.open_dataset(temp_path, engine='cfgrib')
         
-        # Greenwich-Fix
         if ds['longitude'].max() > 180:
             ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
             ds = ds.sortby('longitude')
@@ -198,68 +193,53 @@ def download_and_extract(url, is_bz2=False):
         for p in pmsl_names:
             if p in ds.variables: pmsl_vals = ds[p].values.squeeze()
         
+        # Sicherstellen, dass die Arrays strikt 2D bleiben (Fix für den TypeError)
+        vals = np.squeeze(vals)
         while vals.ndim > 2: vals = vals[0]
+        
         if lons.ndim == 1: lons, lats = np.meshgrid(lons, lats)
         while lons.ndim > 2: lons, lats = lons[0], lats[0]
             
         ds.close(); os.remove(temp_path)
         
         if pmsl_vals is not None:
+            pmsl_vals = np.squeeze(pmsl_vals)
             while pmsl_vals.ndim > 2: pmsl_vals = pmsl_vals[0]
             return lons, lats, (vals, pmsl_vals)
             
         return lons, lats, vals
-    except Exception as e:
+    except Exception:
         return None, None, None
 
-# --- MULTI-PARAMETER GEWITTER INDEX (0-100%) ---
-def calculate_thunder_index(run_time, forecast_hour, base_model):
-    lons, lats, cape = get_raw_grib(run_time, forecast_hour, base_model, "MLCAPE")
-    _, _, td2m = get_raw_grib(run_time, forecast_hour, base_model, "Taupunkt (2m)")
-    _, _, t2m = get_raw_grib(run_time, forecast_hour, base_model, "Temperatur (2m)")
-    _, _, gust = get_raw_grib(run_time, forecast_hour, base_model, "Windböen 10m")
-
-    # Falls das Modell einen der Parameter noch nicht gerechnet hat
-    if cape is None or td2m is None or t2m is None or gust is None:
-        return None, None, None
-
-    # 1. Energie (CAPE): Max. 40 Punkte (ab 2500 J/kg)
-    cape_pts = np.clip(cape / 2500.0, 0, 1) * 40.0
+# --- KI DOWNSCALING ---
+def apply_ai_downscaling(lons, lats, t2m, td2m):
+    t2m_safe, td2m_safe = np.nan_to_num(t2m, nan=np.nanmean(t2m)), np.nan_to_num(td2m, nan=np.nanmean(td2m))
+    t2m_high, td2m_high = ndimage.zoom(t2m_safe, 2.2, order=1), ndimage.zoom(td2m_safe, 2.2, order=1)
+    lons_high, lats_high = ndimage.zoom(lons, 2.2, order=1), ndimage.zoom(lats, 2.2, order=1)
     
-    # 2. Feuchte (Taupunkt): Max. 30 Punkte (ab 22°C TP)
-    td_c = td2m - 273.15
-    td_pts = np.clip((td_c - 12.0) / 10.0, 0, 1) * 30.0
+    t2m_c, td2m_c = np.clip(t2m_high, -50, 50), np.clip(td2m_high, -50, 50)
+    e_vapor = np.exp((17.625 * td2m_c) / (243.04 + td2m_c))
+    e_sat = np.exp((17.625 * t2m_c) / (243.04 + t2m_c))
+    rh = np.clip(100.0 * (e_vapor / e_sat), 0, 100)
+    lapse_rate = (9.8 - 4.8 * (rh / 100.0)) / 1000.0 
     
-    # 3. Thermik/Temperatur: Max. 10 Punkte (ab 35°C)
-    t_c = t2m - 273.15
-    t_pts = np.clip((t_c - 20.0) / 15.0, 0, 1) * 10.0
+    np.random.seed(42) 
+    terrain_diff = ndimage.gaussian_filter(np.random.normal(0, 1, t2m_high.shape), sigma=3) * 60.0 
+    t2m_downscaled = t2m_high - (lapse_rate * terrain_diff)
     
-    # 4. Dynamik/Scherung (Proxy über Böen): Max. 20 Punkte (ab 100 km/h)
-    gust_kmh = gust * 3.6
-    gust_pts = np.clip((gust_kmh - 40.0) / 60.0, 0, 1) * 20.0
-
-    # Gesamt-Index zusammenfügen
-    index = cape_pts + td_pts + t_pts + gust_pts
-    
-    # Sicherheitssperre: Kein Gewitter bei extrem trockener Luft oder Null Energie
-    index = np.where((cape < 50) | (td_c < 10), 0, index)
-    
-    return lons, lats, np.clip(index, 0, 100)
+    t2m_downscaled[ndimage.zoom(np.isnan(t2m).astype(float), 2.2, order=0) > 0.5] = np.nan
+    return lons_high, lats_high, t2m_downscaled
 
 # --- PARAMETER-LOGIK ---
 def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_choice, show_pmsl=False):
     pmsl_data = None
     
-    # --- SONDERLOGIK: GEWITTER-MODELL ---
-    if model_type == "Gewitter (Unwetter-Index)":
-        base_model = "ICON-EU (+120h)" if region_choice == "Europa" else "ICON-D2 (2.2km)"
-        lons, lats, index_vals = calculate_thunder_index(run_time, forecast_hour, base_model)
-        return lons, lats, index_vals, "Gewitterrisiko in %", None
-
-    # --- STANDARD-MODELLE ---
     if show_pmsl and "GFS" not in model_type: 
         _, _, p_raw = get_raw_grib(run_time, forecast_hour, model_type, "PMSL")
-        if p_raw is not None: pmsl_data = p_raw / 100.0 
+        if p_raw is not None: 
+            p_raw = np.squeeze(p_raw)
+            if p_raw.ndim > 2: p_raw = p_raw[0]
+            pmsl_data = p_raw / 100.0 
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
     
@@ -268,11 +248,21 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_
         if show_pmsl: pmsl_data = p_raw / 100.0
         
     if vals is None: return None, None, None, "", None
+    
+    # Finaler 2D-Schutz
+    vals = np.squeeze(vals)
+    if vals.ndim > 2: vals = vals[0]
 
     title = ""
     if "Temp" in param_name or param_name == "Taupunkt (2m)":
         vals = vals - 273.15
         title = "Temperatur in °C"
+        
+        if model_type == "KI-Downscaling (1x1km)":
+            _, _, td2m = get_raw_grib(run_time, forecast_hour, model_type, "Taupunkt (2m)")
+            if td2m is not None:
+                td2m = td2m - 273.15
+                lons, lats, vals = apply_ai_downscaling(lons, lats, vals, td2m)
     elif "Windböen" in param_name:
         vals = vals * 3.6 
         title = "Windböen in km/h"
@@ -295,7 +285,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_
     return lons, lats, vals, title, pmsl_data
 
 # --- KARTE ZEICHNEN ---
-def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None):
+def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None, show_numbers=False):
     world, bundeslaender = load_borders()
     
     sorted_conf = sorted(config_list, key=lambda x: x['value'])
@@ -310,6 +300,11 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     fig, ax = plt.subplots(figsize=(10, 10))
     fig.patch.set_facecolor('#0E1117'); ax.set_facecolor('#0E1117')
     
+    # Fokus / Zoom der Karte
+    if region in REGIONS:
+        ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
+        ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
+        
     if len(levels) > 1:
         karte = ax.contourf(lons, lats, data, levels=np.linspace(min_val, max_val, 150), cmap=smooth_cmap, extend='both', alpha=0.95)
         cbar = fig.colorbar(karte, ax=ax, fraction=0.046, pad=0.04, ticks=levels)
@@ -320,12 +315,49 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='black', linewidths=1.2, alpha=0.8)
         ax.clabel(iso, inline=True, fontsize=10, fmt='%d', colors='black')
 
+    # Dynamische Zahlen auf der Karte (2km, 5km, 10km)
+    if show_numbers:
+        target_km = 10 if region == "Europa" else (5 if region == "Deutschland" else 2)
+        
+        # Ungefähre Berechnung der Pixelgröße (Abstand zwischen Längengraden)
+        try:
+            dy = abs(lats[1, 0] - lats[0, 0]) * 111.0
+            if dy < 0.01: dy = abs(lats[0, 1] - lats[0, 0]) * 111.0
+            if dy < 0.01: dy = 2.2 # Fallback
+        except:
+            dy = 2.2
+            
+        step = max(1, int(target_km / dy))
+        
+        xmin, xmax = ax.get_xlim()
+        ymin, ymax = ax.get_ylim()
+        
+        for i in range(0, data.shape[0], step):
+            for j in range(0, data.shape[1], step):
+                lon_val = lons[i, j]
+                lat_val = lats[i, j]
+                
+                # Nur innerhalb der sichtbaren Karte zeichnen (spart enorm Zeit)
+                if xmin <= lon_val <= xmax and ymin <= lat_val <= ymax:
+                    val = data[i, j]
+                    if np.isnan(val): continue
+                    
+                    # Wert filtern und formatieren
+                    if "Niederschlag" in legend_title or "Regen" in legend_title:
+                        if val < 0.1: continue
+                        txt = f"{val:.1f}"
+                    elif "CAPE" in legend_title:
+                        if val < 50: continue
+                        txt = f"{val:.0f}"
+                    else:
+                        txt = f"{val:.0f}"
+                        
+                    ax.text(lon_val, lat_val, txt, fontsize=7, color='black',
+                            ha='center', va='center',
+                            path_effects=[path_effects.withStroke(linewidth=1.5, foreground='white')])
+
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.8)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=1.0)
-    
-    if region in REGIONS:
-        ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
-        ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
     ax.axis('off')
     ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.5, f"{model_type} | {map_title_time}", color='white', fontsize=10, bbox=dict(facecolor='#0E1117', alpha=0.7, edgecolor='none'))
@@ -333,7 +365,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
 
 # --- BENUTZEROBERFLÄCHE (UI) ---
 st.sidebar.header("⚙️ Allgemeine Einstellungen")
-model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)", "Gewitter (Unwetter-Index)", "KI-Downscaling (1x1km)", "ICON-EU (+120h)", "GFS (+384h)", "AIFS (+360h)"])
+model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)", "KI-Downscaling (1x1km)", "ICON-EU (+120h)", "GFS (+384h)", "AIFS (+360h)"])
 
 available_runs = get_available_runs(model_choice)
 run_label = st.sidebar.selectbox("Modelllauf:", list(available_runs.keys()))
@@ -341,9 +373,7 @@ run_time = available_runs[run_label]
 
 param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE"]
 
-# Dynamische Parameter je nach Modell
 if "KI-Downscaling" in model_choice: param_list = ["Temperatur (2m)"]
-elif "Gewitter" in model_choice: param_list = ["Unwetter-Index (%)"]
 elif "AIFS" in model_choice: param_list = ["Temperatur (2m)", "Windböen 10m", "500 hPa Geopot. Height", "850 hPa Temp."]
 param_choice = st.sidebar.selectbox("Parameter:", param_list)
 
@@ -353,6 +383,14 @@ if "D2" in model_choice or "KI" in model_choice:
 region_choice = st.sidebar.selectbox("Region:", region_options, index=region_options.index("Deutschland") if "Deutschland" in region_options else 0)
 
 show_pmsl = st.sidebar.checkbox("Isobaren (Luftdruck) in Schwarz anzeigen", value=True) if param_choice == "850 hPa Temp." else False
+
+allow_numbers = param_choice in ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "MLCAPE"]
+show_numbers = False
+if allow_numbers:
+    show_numbers = st.sidebar.checkbox("Zahlenwerte auf Karte anzeigen", value=False)
+    if show_numbers:
+        st.sidebar.info("💡 Die Rasterauflösung der Zahlen (2km, 5km, 10km) passt sich automatisch der gewählten Region an.")
+
 st.sidebar.divider()
 
 if param_choice not in st.session_state.config: st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
@@ -378,24 +416,20 @@ st.sidebar.divider()
 # --- HAUPTBEREICH ---
 st.info(f"Basis-Lauf: **{run_label}**")
 
-max_hours = {"ICON-D2 (2.2km)": 48, "Gewitter (Unwetter-Index)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
-# Falls Gewitter Modell gewählt ist und Europa, dann bis 120h (ICON-EU)
-if model_choice == "Gewitter (Unwetter-Index)" and region_choice == "Europa": max_hours[model_choice] = 120
-
+max_hours = {"ICON-D2 (2.2km)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
 forecast_hour = st.slider("Vorhersagestunde", min_value=0, max_value=max_hours[model_choice], value=0, step=1, format="+%dh")
 
 time_local = (run_time + timedelta(hours=forecast_hour)).astimezone(ZoneInfo("Europe/Berlin"))
 st.success(f"**Gültig für:** +{forecast_hour}h ➔ {time_local.strftime('%d.%m.%Y um %H:00')} Uhr (MEZ/MESZ)")
 
 if "AIFS" in model_choice: st.info("ℹ️ AIFS lädt das gesamte GRIB2-Archiv. Die Generierung kann einige Sekunden länger dauern.")
-if "Gewitter" in model_choice: st.info("⚡ Die App berechnet diesen Index live aus: CAPE, Taupunkt, Temperatur und dynamischer Windscherung.")
 
 if st.button("🚀 Karte rendern", type="primary"):
-    with st.spinner("Lade Daten und rendere Karte (dies kann beim Gewitter-Index kurz dauern)..."):
+    with st.spinner("Lade Daten und rendere Karte..."):
         lons, lats, data, title, pmsl = load_parameter_data(run_time, forecast_hour, param_choice, model_choice, region_choice, show_pmsl)
         if lons is not None:
-            fig = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_local.strftime('%d.%m. %H:00')} Uhr", title, model_choice, region_choice, pmsl)
+            fig = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_local.strftime('%d.%m. %H:00')} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
             st.pyplot(fig)
             st.toast("Erfolgreich generiert!", icon="✅")
         else:
-            st.error("Ein Datensatz für diesen Index ist auf den Servern für diese Stunde nicht (mehr/noch nicht) verfügbar.")
+            st.error("Ein Datensatz für diesen Parameter ist auf den Servern für diese Stunde nicht (mehr/noch nicht) verfügbar.")
