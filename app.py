@@ -13,7 +13,6 @@ import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import xarray as xr
-import scipy.ndimage as ndimage
 import io
 
 # --- SEITEN-LAYOUT & MODERNES CSS (UI-Design) ---
@@ -26,8 +25,8 @@ st.markdown("""
             font-family: 'Inter', sans-serif !important;
         }
         img {
-            border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+            border-radius: 12px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.5);
             transition: all 0.3s ease;
         }
         .glass-banner {
@@ -82,14 +81,18 @@ REGIONS = {
     "Schleswig-Holstein / HH": [7.8, 11.5, 53.3, 55.1]
 }
 
-# --- GITHUB & DATEN LADEN ---
+# --- GITHUB & DATEN LADEN (Robuster Config-Loader) ---
 def get_github_client(): return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
 def load_config():
+    config = {k: list(v) for k, v in DEFAULT_CONFIGS.items()}
     g = get_github_client()
     if g and "GITHUB_REPO" in st.secrets:
-        try: return json.loads(g.get_repo(st.secrets["GITHUB_REPO"]).get_contents("config.json").decoded_content.decode())
+        try: 
+            remote_data = json.loads(g.get_repo(st.secrets["GITHUB_REPO"]).get_contents("config.json").decoded_content.decode())
+            if isinstance(remote_data, dict):
+                for k, v in remote_data.items(): config[k] = v
         except: pass
-    return DEFAULT_CONFIGS
+    return config
 
 def save_config(config_data):
     g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
@@ -105,7 +108,8 @@ if "config" not in st.session_state: st.session_state.config = load_config()
 
 @st.cache_data
 def load_borders():
-    w_r, bl_r = requests.get("https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson").text, requests.get("https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/main/2_bundeslaender/4_niedrig.geo.json").text
+    w_r = requests.get("https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson").text
+    bl_r = requests.get("https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/main/2_bundeslaender/4_niedrig.geo.json").text
     with tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f1, tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f2:
         f1.write(w_r); f1_name = f1.name; f2.write(bl_r); f2_name = f2.name
     return gpd.read_file(f1_name), gpd.read_file(f2_name)
@@ -121,7 +125,7 @@ def get_available_runs(model_name):
 def download_and_extract(url, is_bz2=False):
     if not url: return None, None, None
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla"}, timeout=12)
+        resp = requests.get(url, headers={"User-Agent": "Mozilla"}, timeout=15)
         if resp.status_code != 200: return None, None, None
         with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f: f.write(bz2.decompress(resp.content) if is_bz2 else resp.content); temp_path = f.name
         ds = xr.open_dataset(temp_path, engine='cfgrib')
@@ -187,6 +191,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pm
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None, show_numbers=False):
     world, bundeslaender = load_borders()
     
+    # 1. Farben sicher laden
     levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
     colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
     min_v, max_v = min(levels), max(levels)
@@ -195,54 +200,70 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     cmap = mcolors.LinearSegmentedColormap.from_list("custom", list(zip([(v - min_v) / (max_v - min_v) for v in levels], colors)))
     
     fig, ax = plt.subplots(figsize=(10, 10))
-    
-    # Standard Darkmode-Hintergrund
     fig.patch.set_facecolor('#0E1117')
     ax.set_facecolor('#0E1117')
     
-    if region in REGIONS: ax.set_xlim(REGIONS[region][0], REGIONS[region][1]); ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
+    # Region Zoom
+    if region in REGIONS: 
+        ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
+        ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
+    # Hauptkarte zeichnen
     karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=0.95)
     
-    # Farbskala (Horizontal unten)
-    cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.046, pad=0.04, ticks=levels)
-    cbar.set_label(legend_title, color='white', size=12)
-    cbar.ax.xaxis.set_tick_params(color='white', labelcolor='white')
+    # 2. Elegante, horizontale Farbskala unten
+    cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
+    cbar.set_label(legend_title, color='white', size=11, fontweight='bold')
+    cbar.ax.xaxis.set_tick_params(color='white', labelcolor='white', labelsize=9)
     
-    # Subtile Grenzen
+    # Grenzen
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.2)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=0.4)
 
+    # Isobaren
     if pmsl_data is not None:
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='white', linewidths=1.0, alpha=0.6)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors='white')
 
+    # 3. Zahlenwerte (Gefixtes, robusteres Raster)
     if show_numbers:
-        target_km = 10 if region == "Europa" else (5 if region == "Deutschland" else 2)
-        try: dy = abs(lats[1, 0] - lats[0, 0]) * 111.0
+        xmin, xmax = ax.get_xlim()
+        ymin, ymax = ax.get_ylim()
+        
+        # Sicherer Schrittgrößen-Rechner
+        try: dy = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
         except: dy = 2.2
-        if dy < 0.01: dy = 2.2
+        if dy < 0.1: dy = 2.2
+            
+        target_km = 12 if region == "Europa" else (5 if region == "Deutschland" else 2)
         step = max(1, int(target_km / dy))
         
-        xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
-        grid_mask = np.zeros_like(mask, dtype=bool); grid_mask[::step, ::step] = True
+        grid_mask = np.zeros_like(mask, dtype=bool)
+        grid_mask[::step, ::step] = True
         final_mask = mask & grid_mask
         
-        for lon_val, lat_val, val in zip(lons[final_mask], lats[final_mask], data[final_mask]):
+        valid_lons, valid_lats, valid_data = lons[final_mask], lats[final_mask], data[final_mask]
+        
+        for lon_val, lat_val, val in zip(valid_lons, valid_lats, valid_data):
             if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
             if "CAPE" in legend_title and val < 50: continue
             txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
             
-            ax.text(lon_val, lat_val, txt, fontsize=9, fontfamily='sans-serif', fontweight='bold', color='#111', ha='center', va='center', path_effects=[path_effects.withStroke(linewidth=2, foreground=(1.0, 1.0, 1.0, 0.8))])
+            ax.text(lon_val, lat_val, txt, fontsize=8, fontfamily='sans-serif', fontweight='bold', 
+                    color='black', ha='center', va='center', 
+                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground='white')])
 
     ax.axis('off')
     
-    txt = ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.4, f"{model_type} | {map_title_time}", color='white', fontsize=12, fontweight='bold', fontfamily='sans-serif')
-    txt.set_path_effects([path_effects.withStroke(linewidth=3, foreground=(0.0, 0.0, 0.0, 0.8))])
+    # 4. Der NEUE Header: Schick, modern und immer exakt oben links in der Ecke
+    bbox_props = dict(boxstyle="round,pad=0.4", fc="#0E1117", ec="white", lw=0.5, alpha=0.85)
+    ax.text(0.015, 0.985, f"{model_type} | {map_title_time}", transform=ax.transAxes, 
+            color='white', fontsize=11, fontweight='bold', fontfamily='sans-serif', 
+            ha='left', va='top', bbox=bbox_props)
     
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
     plt.close(fig)
     return buf.getvalue()
 
@@ -262,13 +283,15 @@ region_options = list(REGIONS.keys())
 if "D2" in model_choice: region_options.remove("Europa") 
 region_choice = st.sidebar.selectbox("Region:", region_options, index=region_options.index("Deutschland") if "Deutschland" in region_options else 0)
 
-# Design Toggles
 st.sidebar.divider()
 st.sidebar.subheader("🎨 Optik & Details")
 show_pmsl = st.sidebar.toggle("Isobaren (Luftdruck) einblenden", value=True) if param_choice == "850 hPa Temp." else False
 show_numbers = st.sidebar.toggle("Zahlenwerte auf Karte anzeigen", value=False) if param_choice in ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "MLCAPE"] else False
 
-if param_choice not in st.session_state.config: st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
+# Sicherstellen, dass die Config für diesen Parameter IMMER existiert
+if param_choice not in st.session_state.config: 
+    st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
+
 with st.sidebar.expander(f"Farbskala anpassen"):
     new_config = []
     for i, item in enumerate(st.session_state.config[param_choice]):
@@ -276,12 +299,13 @@ with st.sidebar.expander(f"Farbskala anpassen"):
         with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{i}", label_visibility="collapsed")
         with c2: col = st.color_picker("F", value=item['color'], key=f"c_{i}", label_visibility="collapsed")
         with c3:
-            if st.button("🗑️", key=f"d_{i}"): st.session_state.config[param_choice].pop(i); st.rerun()
+            if st.button("🗑️", key=f"d_{i}"): 
+                st.session_state.config[param_choice].pop(i)
+                st.rerun()
         new_config.append({"value": val, "color": col})
     
     st.session_state.config[param_choice] = new_config
     
-    # HIER IST DER FEHLENDE KNOPF WIEDER DRIN!
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("➕ Neu"): 
@@ -316,6 +340,7 @@ st.markdown(f"""
     </div>
 """, unsafe_allow_html=True)
 
+# Der Cache merkt jetzt JEDE Farbänderung sofort!
 config_hash = hash(str(st.session_state.config[param_choice]))
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}_{config_hash}"
 
