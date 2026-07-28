@@ -154,5 +154,27 @@
             "value": 600.0,
             "color": "#7c008a"
         }
+    ],
+    "850 hPa Temp.": [
+        {
+            "value": -20.0,
+            "color": "#1c00e2"
+        },
+        {
+            "value": -10.0,
+            "color": "#0084e2"
+        },
+        {
+            "value": 0.0,
+            "color": "#0e7f00"
+        },
+        {
+            "value": 10.0,
+            "color": "#e8ad00"
+        },
+        {
+            "value": 20.0,
+            "color": "#e70000"
+        }
     ]
 }
