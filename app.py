@@ -152,7 +152,6 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     if param_name not in dm: return None, None, None
     fld, var, lvl = dm[param_name]
     
-    # KORREKTUR DER DWD-URLS (Beachtet nun auch die pressure-levels bei ICON-D2 korrekt!)
     if lvl: 
         if "D2" in model: u = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{fld}/icon-d2_germany_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2"
         else: u = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2"
@@ -205,7 +204,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
     karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=0.95)
     
-    # KORREKTUR 1: Die Farbskala ist wieder da (Horizontal unten)
+    # Farbskala (Horizontal unten)
     cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.046, pad=0.04, ticks=levels)
     cbar.set_label(legend_title, color='white', size=12)
     cbar.ax.xaxis.set_tick_params(color='white', labelcolor='white')
@@ -279,8 +278,18 @@ with st.sidebar.expander(f"Farbskala anpassen"):
         with c3:
             if st.button("🗑️", key=f"d_{i}"): st.session_state.config[param_choice].pop(i); st.rerun()
         new_config.append({"value": val, "color": col})
+    
     st.session_state.config[param_choice] = new_config
-    if st.button("💾 Farbskala Speichern"): save_config(st.session_state.config)
+    
+    # HIER IST DER FEHLENDE KNOPF WIEDER DRIN!
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("➕ Neu"): 
+            st.session_state.config[param_choice].append({"value": 0.0, "color": "#ffffff"})
+            st.rerun()
+    with col_btn2:
+        if st.button("💾 Speichern"): 
+            save_config(st.session_state.config)
 
 # --- HAUPTBEREICH & SCHIEBEREGLER ---
 max_h = {"ICON-D2 (2.2km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}[model_choice]
@@ -307,8 +316,6 @@ st.markdown(f"""
     </div>
 """, unsafe_allow_html=True)
 
-# KORREKTUR 2: Der Hash der Farbskala wird nun in den Cache-Key geschrieben. 
-# Dadurch wird die Karte bei JEDER Änderung eines Farbwerts SOFORT neu gerendert!
 config_hash = hash(str(st.session_state.config[param_choice]))
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}_{config_hash}"
 
