@@ -54,6 +54,7 @@ st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
 
 if "map_cache" not in st.session_state: st.session_state.map_cache = {}
 if "f_hour" not in st.session_state: st.session_state.f_hour = 0
+if "config" not in st.session_state: st.session_state.config = {}
 
 # --- STANDARD-KONFIGURATION ---
 DEFAULT_CONFIGS = {
@@ -81,30 +82,46 @@ REGIONS = {
     "Schleswig-Holstein / HH": [7.8, 11.5, 53.3, 55.1]
 }
 
-# --- GITHUB & DATEN LADEN (Robuster Config-Loader) ---
-def get_github_client(): return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
-def load_config():
-    config = {k: list(v) for k, v in DEFAULT_CONFIGS.items()}
+# --- NEU: SICHERES GITHUB SPEICHER-SYSTEM PRO PARAMETER ---
+def get_github_client(): 
+    return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
+
+def get_config_filename(param_name):
+    # Ersetzt Leerzeichen und Sonderzeichen für saubere Dateinamen
+    safe_name = param_name.replace(" ", "_").replace("/", "_").replace(".", "")
+    return f"config_{safe_name}.json"
+
+def load_param_config(param_name):
     g = get_github_client()
     if g and "GITHUB_REPO" in st.secrets:
         try: 
-            remote_data = json.loads(g.get_repo(st.secrets["GITHUB_REPO"]).get_contents("config.json").decoded_content.decode())
-            if isinstance(remote_data, dict):
-                for k, v in remote_data.items(): config[k] = v
-        except: pass
-    return config
+            repo = g.get_repo(st.secrets["GITHUB_REPO"])
+            filename = get_config_filename(param_name)
+            file_content = repo.get_contents(filename).decoded_content.decode()
+            loaded_data = json.loads(file_content)
+            if isinstance(loaded_data, list):
+                return loaded_data
+        except Exception: 
+            pass # Datei existiert noch nicht, wir nutzen den Fallback
+            
+    return DEFAULT_CONFIGS.get(param_name, DEFAULT_CONFIGS["Temperatur (2m)"])
 
-def save_config(config_data):
+def save_param_config(param_name, config_list):
     g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
     if g and repo_name:
         try:
             repo = g.get_repo(repo_name)
-            try: repo.update_file("config.json", "Update", json.dumps(config_data, indent=4), repo.get_contents("config.json").sha)
-            except: repo.create_file("config.json", "Create", json.dumps(config_data, indent=4))
-            st.success("Erfolgreich gespeichert!")
-        except Exception as e: st.error(f"Fehler: {e}")
-
-if "config" not in st.session_state: st.session_state.config = load_config()
+            filename = get_config_filename(param_name)
+            try: 
+                # Aktualisieren, falls die Datei schon existiert
+                file = repo.get_contents(filename)
+                repo.update_file(filename, f"Update Farbskala für {param_name}", json.dumps(config_list, indent=4), file.sha)
+            except: 
+                # Neu anlegen, falls sie noch nicht existiert
+                repo.create_file(filename, f"Create Farbskala für {param_name}", json.dumps(config_list, indent=4))
+            st.success(f"Farbskala für {param_name} erfolgreich isoliert gespeichert!")
+        except Exception as e: 
+            st.error(f"Fehler beim Speichern: {e}")
 
 @st.cache_data
 def load_borders():
@@ -191,7 +208,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pm
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None, show_numbers=False):
     world, bundeslaender = load_borders()
     
-    # 1. Farben sicher laden
     levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
     colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
     min_v, max_v = min(levels), max(levels)
@@ -203,34 +219,27 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     fig.patch.set_facecolor('#0E1117')
     ax.set_facecolor('#0E1117')
     
-    # Region Zoom
     if region in REGIONS: 
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
-    # Hauptkarte zeichnen
     karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=0.95)
     
-    # 2. Elegante, horizontale Farbskala unten
+    # Elegante, horizontale Farbskala unten
     cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
     cbar.set_label(legend_title, color='white', size=11, fontweight='bold')
     cbar.ax.xaxis.set_tick_params(color='white', labelcolor='white', labelsize=9)
     
-    # Grenzen
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.2)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=0.4)
 
-    # Isobaren
     if pmsl_data is not None:
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='white', linewidths=1.0, alpha=0.6)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors='white')
 
-    # 3. Zahlenwerte (Gefixtes, robusteres Raster)
     if show_numbers:
         xmin, xmax = ax.get_xlim()
         ymin, ymax = ax.get_ylim()
-        
-        # Sicherer Schrittgrößen-Rechner
         try: dy = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
         except: dy = 2.2
         if dy < 0.1: dy = 2.2
@@ -256,7 +265,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
 
     ax.axis('off')
     
-    # 4. Der NEUE Header: Schick, modern und immer exakt oben links in der Ecke
+    # Modernes Header-Label oben links
     bbox_props = dict(boxstyle="round,pad=0.4", fc="#0E1117", ec="white", lw=0.5, alpha=0.85)
     ax.text(0.015, 0.985, f"{model_type} | {map_title_time}", transform=ax.transAxes, 
             color='white', fontsize=11, fontweight='bold', fontfamily='sans-serif', 
@@ -279,6 +288,10 @@ param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Nieders
 if "AIFS" in model_choice: param_list = ["Temperatur (2m)", "Windböen 10m", "500 hPa Geopot. Height", "850 hPa Temp."]
 param_choice = st.sidebar.selectbox("Parameter:", param_list)
 
+# Wenn ein Parameter gewählt wird, lade gezielt seine Farb-Datei (falls noch nicht passiert)
+if param_choice not in st.session_state.config: 
+    st.session_state.config[param_choice] = load_param_config(param_choice)
+
 region_options = list(REGIONS.keys())
 if "D2" in model_choice: region_options.remove("Europa") 
 region_choice = st.sidebar.selectbox("Region:", region_options, index=region_options.index("Deutschland") if "Deutschland" in region_options else 0)
@@ -287,10 +300,6 @@ st.sidebar.divider()
 st.sidebar.subheader("🎨 Optik & Details")
 show_pmsl = st.sidebar.toggle("Isobaren (Luftdruck) einblenden", value=True) if param_choice == "850 hPa Temp." else False
 show_numbers = st.sidebar.toggle("Zahlenwerte auf Karte anzeigen", value=False) if param_choice in ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "MLCAPE"] else False
-
-# Sicherstellen, dass die Config für diesen Parameter IMMER existiert
-if param_choice not in st.session_state.config: 
-    st.session_state.config[param_choice] = DEFAULT_CONFIGS.get(param_choice, DEFAULT_CONFIGS["Temperatur (2m)"])
 
 with st.sidebar.expander(f"Farbskala anpassen"):
     new_config = []
@@ -313,7 +322,7 @@ with st.sidebar.expander(f"Farbskala anpassen"):
             st.rerun()
     with col_btn2:
         if st.button("💾 Speichern"): 
-            save_config(st.session_state.config)
+            save_param_config(param_choice, st.session_state.config[param_choice])
 
 # --- HAUPTBEREICH & SCHIEBEREGLER ---
 max_h = {"ICON-D2 (2.2km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}[model_choice]
@@ -340,7 +349,6 @@ st.markdown(f"""
     </div>
 """, unsafe_allow_html=True)
 
-# Der Cache merkt jetzt JEDE Farbänderung sofort!
 config_hash = hash(str(st.session_state.config[param_choice]))
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}_{config_hash}"
 
