@@ -206,7 +206,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
     karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=0.95)
     
-    # Subtile Grenzen (KORRIGIERT: Matplotlib-kompatible Alpha-Werte genutzt)
+    # Subtile Grenzen (Korrigiert auf Matplotlib-Standard)
     world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.2)
     bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=0.4)
 
@@ -230,13 +230,15 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
             if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
             if "CAPE" in legend_title and val < 50: continue
             txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
-            ax.text(lon_val, lat_val, txt, fontsize=9, fontfamily='sans-serif', fontweight='bold', color='#111', ha='center', va='center', path_effects=[path_effects.withStroke(linewidth=2, foreground='rgba(255,255,255,0.8)')])
+            
+            # KORREKTUR: Tupel für die Text-Umrandung (Weiß mit 80% Deckkraft) anstatt CSS-String
+            ax.text(lon_val, lat_val, txt, fontsize=9, fontfamily='sans-serif', fontweight='bold', color='#111', ha='center', va='center', path_effects=[path_effects.withStroke(linewidth=2, foreground=(1.0, 1.0, 1.0, 0.8))])
 
     ax.axis('off')
     
-    # Modernes Overlay-Label mit Schatten
+    # KORREKTUR: Tupel für die Label-Umrandung (Schwarz mit 80% Deckkraft) anstatt CSS-String
     txt = ax.text(ax.get_xlim()[0] + 0.2, ax.get_ylim()[1] - 0.4, f"{model_type} | {map_title_time}", color='white', fontsize=12, fontweight='bold', fontfamily='sans-serif')
-    txt.set_path_effects([path_effects.withStroke(linewidth=3, foreground='rgba(0,0,0,0.8)')])
+    txt.set_path_effects([path_effects.withStroke(linewidth=3, foreground=(0.0, 0.0, 0.0, 0.8))])
     
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0, facecolor=fig.get_facecolor())
@@ -284,7 +286,7 @@ tz_berlin = ZoneInfo("Europe/Berlin")
 start_time_local = run_time.astimezone(tz_berlin)
 end_time_local = start_time_local + timedelta(hours=max_h)
 
-# Der magische Echtzeit-Schieberegler (zeigt direkt Datum & Uhrzeit beim Ziehen)
+# Der magische Echtzeit-Schieberegler
 selected_datetime = st.slider(
     "Zeitpunkt wählen:", 
     min_value=start_time_local, 
@@ -294,11 +296,9 @@ selected_datetime = st.slider(
     format="ddd, DD.MM. - HH:mm"
 )
 
-# Vorhersagestunde aus der gewählten Uhrzeit berechnen
 chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
 st.session_state.f_hour = chosen_f_hour
 
-# Der schwebende Glassmorphism Banner
 st.markdown(f"""
     <div class="glass-banner">
         🌤️ {model_choice} | 🌡️ {param_choice}<br>
@@ -308,11 +308,10 @@ st.markdown(f"""
 
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}"
 
-# Wenn die Karte im Cache liegt, zeigen wir sie direkt. Wenn nicht, zeigen wir den Button!
 if cache_key in st.session_state.map_cache:
-    st.image(st.session_state.map_cache[cache_key], use_column_width=True)
+    # use_column_width wird genutzt statt dem veralteten use_container_width
+    st.image(st.session_state.map_cache[cache_key], use_container_width=True)
 else:
-    # Der explizite Render-Knopf
     if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary", use_container_width=True):
         with st.spinner("Lade GRIB-Daten und rendere Karte im neuen Design..."):
             lons, lats, data, title, pmsl = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, show_pmsl)
@@ -320,6 +319,6 @@ else:
                 t_str = selected_datetime.strftime('%d.%m. %H:00')
                 img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
                 st.session_state.map_cache[cache_key] = img_bytes
-                st.rerun() # Lade die Seite neu, damit das Bild aus dem Cache perfekt angezeigt wird
+                st.rerun() 
             else:
-                st.error("Ein Datensatz für diesen Parameter ist auf den DWD-Servern noch nicht verfügbar.")
+                st.error("Ein Datensatz für diesen Parameter ist auf den Servern noch nicht verfügbar.")
