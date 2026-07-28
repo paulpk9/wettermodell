@@ -89,7 +89,7 @@ REGIONS = {
     "Schleswig-Holstein / HH": [7.8, 11.5, 53.3, 55.1]
 }
 
-# --- GITHUB & DATEN LADEN (gekürzt für Übersichtlichkeit) ---
+# --- GITHUB & DATEN LADEN ---
 def get_github_client(): return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
 def load_config():
     g = get_github_client()
@@ -184,7 +184,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pm
     return lons, lats, vals, title, pmsl_data
 
 # --- MODERNISIERTE KARTE ZEICHNEN ---
-def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None, show_numbers=False, show_relief=False):
+def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, pmsl_data=None, show_numbers=False):
     world, bundeslaender = load_borders()
     
     levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
@@ -198,24 +198,17 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     fig, ax = plt.subplots(figsize=(10, 10))
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
     
-    # Relief Design Logik
-    if show_relief:
-        fig.patch.set_facecolor('#0B0D14') # Ozean Tiefblau
-        ax.set_facecolor('#0B0D14')
-        world.plot(ax=ax, facecolor='#161922', edgecolor='none') # Land etwas heller
-        data_alpha = 0.75 # Daten leicht durchsichtig für Relief
-    else:
-        fig.patch.set_facecolor('#0E1117')
-        ax.set_facecolor('#0E1117')
-        data_alpha = 0.95
+    # Standard Darkmode-Hintergrund
+    fig.patch.set_facecolor('#0E1117')
+    ax.set_facecolor('#0E1117')
     
     if region in REGIONS: ax.set_xlim(REGIONS[region][0], REGIONS[region][1]); ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
-    karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=data_alpha)
+    karte = ax.contourf(lons, lats, data, levels=np.linspace(min_v, max_v, 150), cmap=cmap, extend='both', alpha=0.95)
     
-    # Subtile Grenzen (Modernes Design)
-    world.boundary.plot(ax=ax, edgecolor='rgba(255,255,255,0.2)', linewidth=0.8)
-    bundeslaender.boundary.plot(ax=ax, edgecolor='rgba(255,255,255,0.4)', linewidth=1.2)
+    # Subtile Grenzen (KORRIGIERT: Matplotlib-kompatible Alpha-Werte genutzt)
+    world.boundary.plot(ax=ax, edgecolor='white', linewidth=0.8, alpha=0.2)
+    bundeslaender.boundary.plot(ax=ax, edgecolor='white', linewidth=1.2, alpha=0.4)
 
     if pmsl_data is not None:
         iso = ax.contour(lons, lats, pmsl_data, levels=np.arange(900, 1100, 5), colors='white', linewidths=1.0, alpha=0.6)
@@ -269,7 +262,6 @@ region_choice = st.sidebar.selectbox("Region:", region_options, index=region_opt
 # Design Toggles
 st.sidebar.divider()
 st.sidebar.subheader("🎨 Optik & Details")
-show_relief = st.sidebar.toggle("Subtiler Relief-Hintergrund", value=True)
 show_pmsl = st.sidebar.toggle("Isobaren (Luftdruck) einblenden", value=True) if param_choice == "850 hPa Temp." else False
 show_numbers = st.sidebar.toggle("Zahlenwerte auf Karte anzeigen", value=False) if param_choice in ["Temperatur (2m)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "MLCAPE"] else False
 
@@ -314,11 +306,11 @@ st.markdown(f"""
     </div>
 """, unsafe_allow_html=True)
 
-cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}_{show_relief}"
+cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}"
 
 # Wenn die Karte im Cache liegt, zeigen wir sie direkt. Wenn nicht, zeigen wir den Button!
 if cache_key in st.session_state.map_cache:
-    st.image(st.session_state.map_cache[cache_key], use_container_width=True)
+    st.image(st.session_state.map_cache[cache_key], use_column_width=True)
 else:
     # Der explizite Render-Knopf
     if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary", use_container_width=True):
@@ -326,7 +318,7 @@ else:
             lons, lats, data, title, pmsl = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, show_pmsl)
             if lons is not None:
                 t_str = selected_datetime.strftime('%d.%m. %H:00')
-                img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, pmsl, show_numbers, show_relief)
+                img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, pmsl, show_numbers)
                 st.session_state.map_cache[cache_key] = img_bytes
                 st.rerun() # Lade die Seite neu, damit das Bild aus dem Cache perfekt angezeigt wird
             else:
