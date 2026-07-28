@@ -13,13 +13,24 @@ import geopandas as gpd
 import shutil
 
 # --- EINSTELLUNGEN FÜR DEN WORKER ---
-# Um den Server nicht zu überlasten, definieren wir hier, was gerendert werden soll.
 MODELS_TO_RENDER = ["ICON-D2"] 
-REGIONS_TO_RENDER = ["Deutschland"] # Später erweiterbar auf Bundesländer
+REGIONS_TO_RENDER = ["Deutschland"]
 PARAMS_TO_RENDER = ["Temperatur (2m)", "Akk. Niederschlag (mm)"]
-FORECAST_HOURS = list(range(0, 49, 1)) # Von 0 bis 48 Stunden in 1h-Schritten
+FORECAST_HOURS = list(range(0, 49, 1))
 
 print("🚀 Starte Wetter-Render-Worker...")
+
+# --- HIER IST DAS FEHLENDE WÖRTERBUCH (DEFAULT_CONFIGS) ---
+DEFAULT_CONFIGS = {
+    "Temperatur (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 15.0, "color": "#fdae61"}, {"value": 30.0, "color": "#d73027"}],
+    "Taupunkt (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 10.0, "color": "#e0f3f8"}, {"value": 20.0, "color": "#fdae61"}],
+    "Windböen 10m": [{"value": 0.0, "color": "#ffffff"}, {"value": 40.0, "color": "#ffffcc"}, {"value": 70.0, "color": "#fd8d3c"}, {"value": 100.0, "color": "#e31a1c"}, {"value": 130.0, "color": "#800026"}],
+    "Akk. Niederschlag (mm)": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 10.0, "color": "#1f78b4"}, {"value": 30.0, "color": "#33a02c"}],
+    "Niederschlagsrate (mm/h)": [{"value": 0.0, "color": "#ffffff"}, {"value": 0.5, "color": "#a6cee3"}, {"value": 2.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#33a02c"}, {"value": 25.0, "color": "#fb9a99"}],
+    "500 hPa Geopot. Height": [{"value": 500.0, "color": "#313695"}, {"value": 540.0, "color": "#e0f3f8"}, {"value": 580.0, "color": "#d73027"}],
+    "850 hPa Temp.": [{"value": -20.0, "color": "#313695"}, {"value": -10.0, "color": "#74add1"}, {"value": 0.0, "color": "#ffffff"}, {"value": 10.0, "color": "#fdae61"}, {"value": 20.0, "color": "#d73027"}],
+    "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}]
+}
 
 # --- CONFIG LADEN ---
 try:
@@ -27,10 +38,7 @@ try:
         config_data = json.load(f)
 except Exception as e:
     print(f"⚠️ Konnte config.json nicht laden, nutze Fallback. Fehler: {e}")
-    config_data = {
-        "Temperatur (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 15.0, "color": "#fdae61"}, {"value": 30.0, "color": "#d73027"}],
-        "Akk. Niederschlag (mm)": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 10.0, "color": "#1f78b4"}, {"value": 30.0, "color": "#33a02c"}]
-    }
+    config_data = DEFAULT_CONFIGS
 
 # --- GRENZEN LADEN ---
 print("🌍 Lade Kartengrenzen...")
@@ -45,7 +53,6 @@ os.remove(f1_name); os.remove(f2_name)
 
 # --- ZEIT-LOGIK ---
 now = datetime.now(timezone.utc)
-# Wir ziehen 2,5 Stunden ab, um sicherzugehen, dass der DWD-Lauf komplett online ist
 effective_now = now - timedelta(hours=2.5)
 latest_run = effective_now.replace(hour=(effective_now.hour // 3) * 3, minute=0, second=0, microsecond=0)
 run_str = f"{latest_run.hour:02d}"
@@ -61,7 +68,6 @@ if os.path.exists(base_folder):
         if os.path.isdir(model_path):
             for run_folder in os.listdir(model_path):
                 try:
-                    # Parse den Ordnernamen zurück in eine Zeit
                     folder_time = datetime.strptime(run_folder, "%Y-%m-%d_%HZ").replace(tzinfo=timezone.utc)
                     if now - folder_time > timedelta(hours=24):
                         print(f"🗑️ Lösche alten Lauf: {run_folder}")
@@ -105,6 +111,7 @@ def download_dwd_grib(run_time, f_hour, param):
 
 # --- RENDER-FUNKTION ---
 def render_and_save(lons, lats, data, param, hr, region, save_path):
+    # HIER GREIFT ER NUN SICHER AUF DEFAULT_CONFIGS ZU:
     conf = config_data.get(param, DEFAULT_CONFIGS.get(param))
     levels = [c['value'] for c in sorted(conf, key=lambda x: x['value'])]
     colors = [c['color'] for c in sorted(conf, key=lambda x: x['value'])]
@@ -125,10 +132,10 @@ def render_and_save(lons, lats, data, param, hr, region, save_path):
     cbar.set_label(param, color='white', size=12)
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
     
-    # ZAHLEN (Der Matplotlib Performance-Fix)
+    # ZAHLEN 
     dy = abs(lats[1, 0] - lats[0, 0]) * 111.0
     if dy < 0.01: dy = 2.2
-    step = max(1, int(5 / dy)) # 5km Raster für Deutschland
+    step = max(1, int(5 / dy)) # 5km Raster
     
     xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
     mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
