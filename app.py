@@ -27,7 +27,8 @@ DEFAULT_CONFIGS = {
     "Niederschlagsrate (mm/h)": [{"value": 0.0, "color": "#ffffff"}, {"value": 0.5, "color": "#a6cee3"}, {"value": 2.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#33a02c"}, {"value": 25.0, "color": "#fb9a99"}],
     "500 hPa Geopot. Height": [{"value": 500.0, "color": "#313695"}, {"value": 540.0, "color": "#e0f3f8"}, {"value": 580.0, "color": "#d73027"}],
     "850 hPa Temp.": [{"value": -20.0, "color": "#313695"}, {"value": -10.0, "color": "#74add1"}, {"value": 0.0, "color": "#ffffff"}, {"value": 10.0, "color": "#fdae61"}, {"value": 20.0, "color": "#d73027"}],
-    "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}]
+    "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}],
+    "Unwetter-Index (%)": [{"value": 0.0, "color": "#ffffff"}, {"value": 25.0, "color": "#a6d96a"}, {"value": 50.0, "color": "#fdae61"}, {"value": 75.0, "color": "#d7191c"}, {"value": 95.0, "color": "#7a0177"}]
 }
 
 # --- REGIONEN DEFINITIONEN (Bounding Boxes) ---
@@ -97,21 +98,26 @@ def load_borders():
 # --- MODELLLÄUFE BERECHNEN ---
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    step = 3 if "D2" in model_name or "KI" in model_name else 6
+    # AIFS rechnet nur alle 12h, GFS und ICON-EU alle 6h, D2 alle 3h
+    if "AIFS" in model_name: step = 12
+    elif "GFS" in model_name or "EU" in model_name: step = 6
+    else: step = 3
+    
     latest_run = now.replace(hour=(now.hour // step) * step, minute=0, second=0, microsecond=0)
     return {f"{ (latest_run - timedelta(hours=i*step)).strftime('%d.%m.%Y | %H:02d') }Z (UTC)": (latest_run - timedelta(hours=i*step)) for i in range(8)}
 
-# --- INTELLIGENTER GRIB2 DOWNLOADER (DWD, NOAA, ECMWF) ---
+# --- INTELLIGENTER GRIB2 DOWNLOADER ---
 @st.cache_data(ttl=3600)
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
     
-    # --- 1. AIFS (ECMWF KI) Logik ---
+    # --- 1. AIFS (ECMWF KI) Logik (Bugfix: keine führenden Nullen bei Stunden) ---
     if "AIFS" in model:
-        url = f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{hour_str}h-oper-fc.grib2"
+        hour_str_aifs = str(forecast_hour) 
+        url = f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{hour_str_aifs}h-oper-fc.grib2"
         return download_and_extract(url)
 
-    # --- 2. GFS (NOAA) Logik ---
+    # --- 2. GFS (NOAA) Logik (Bugfix: Header) ---
     if "GFS" in model:
         base_url = f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}"
         var_map = {
@@ -125,10 +131,8 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
             "MLCAPE": "var_CAPE=on&lev_surface=on",
             "PMSL": "var_PRMSL=on&lev_mean_sea_level=on"
         }
-        
         filter_str = var_map.get(param_name, "")
         if param_name == "850 hPa Temp.": filter_str += "&" + var_map["PMSL"]
-        
         url = f"{base_url}&{filter_str}" if filter_str else None
         return download_and_extract(url)
 
@@ -166,8 +170,9 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
 
 def download_and_extract(url, is_bz2=False):
     if not url: return None, None, None
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"} # Bugfix GFS
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=12)
         if resp.status_code != 200: return None, None, None
         
         data = bz2.decompress(resp.content) if is_bz2 else resp.content
@@ -177,12 +182,11 @@ def download_and_extract(url, is_bz2=False):
             
         ds = xr.open_dataset(temp_path, engine='cfgrib')
         
-        # --- DER GREENWICH-FIX: 0-360 auf -180..180 verschieben ---
+        # Greenwich-Fix
         if ds['longitude'].max() > 180:
             ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
             ds = ds.sortby('longitude')
         
-        # Dynamisch die richtigen Variablen finden
         possible_vars = ['t2m', '2t', 't', 'd2m', '2d', 'vmax_10m', 'gust', 'tp', 'tot_prec', 'fi', 'z', 'gh', 'cape', 'cape_ml']
         actual_var = next((v for v in possible_vars if v in ds.variables), list(ds.data_vars)[0])
             
@@ -205,32 +209,54 @@ def download_and_extract(url, is_bz2=False):
             return lons, lats, (vals, pmsl_vals)
             
         return lons, lats, vals
-    except Exception:
+    except Exception as e:
         return None, None, None
 
-# --- KI DOWNSCALING ---
-def apply_ai_downscaling(lons, lats, t2m, td2m):
-    t2m_safe, td2m_safe = np.nan_to_num(t2m, nan=np.nanmean(t2m)), np.nan_to_num(td2m, nan=np.nanmean(td2m))
-    t2m_high, td2m_high = ndimage.zoom(t2m_safe, 2.2, order=1), ndimage.zoom(td2m_safe, 2.2, order=1)
-    lons_high, lats_high = ndimage.zoom(lons, 2.2, order=1), ndimage.zoom(lats, 2.2, order=1)
+# --- MULTI-PARAMETER GEWITTER INDEX (0-100%) ---
+def calculate_thunder_index(run_time, forecast_hour, base_model):
+    lons, lats, cape = get_raw_grib(run_time, forecast_hour, base_model, "MLCAPE")
+    _, _, td2m = get_raw_grib(run_time, forecast_hour, base_model, "Taupunkt (2m)")
+    _, _, t2m = get_raw_grib(run_time, forecast_hour, base_model, "Temperatur (2m)")
+    _, _, gust = get_raw_grib(run_time, forecast_hour, base_model, "Windböen 10m")
+
+    # Falls das Modell einen der Parameter noch nicht gerechnet hat
+    if cape is None or td2m is None or t2m is None or gust is None:
+        return None, None, None
+
+    # 1. Energie (CAPE): Max. 40 Punkte (ab 2500 J/kg)
+    cape_pts = np.clip(cape / 2500.0, 0, 1) * 40.0
     
-    t2m_c, td2m_c = np.clip(t2m_high, -50, 50), np.clip(td2m_high, -50, 50)
-    e_vapor = np.exp((17.625 * td2m_c) / (243.04 + td2m_c))
-    e_sat = np.exp((17.625 * t2m_c) / (243.04 + t2m_c))
-    rh = np.clip(100.0 * (e_vapor / e_sat), 0, 100)
-    lapse_rate = (9.8 - 4.8 * (rh / 100.0)) / 1000.0 
+    # 2. Feuchte (Taupunkt): Max. 30 Punkte (ab 22°C TP)
+    td_c = td2m - 273.15
+    td_pts = np.clip((td_c - 12.0) / 10.0, 0, 1) * 30.0
     
-    np.random.seed(42) 
-    terrain_diff = ndimage.gaussian_filter(np.random.normal(0, 1, t2m_high.shape), sigma=3) * 60.0 
-    t2m_downscaled = t2m_high - (lapse_rate * terrain_diff)
+    # 3. Thermik/Temperatur: Max. 10 Punkte (ab 35°C)
+    t_c = t2m - 273.15
+    t_pts = np.clip((t_c - 20.0) / 15.0, 0, 1) * 10.0
     
-    t2m_downscaled[ndimage.zoom(np.isnan(t2m).astype(float), 2.2, order=0) > 0.5] = np.nan
-    return lons_high, lats_high, t2m_downscaled
+    # 4. Dynamik/Scherung (Proxy über Böen): Max. 20 Punkte (ab 100 km/h)
+    gust_kmh = gust * 3.6
+    gust_pts = np.clip((gust_kmh - 40.0) / 60.0, 0, 1) * 20.0
+
+    # Gesamt-Index zusammenfügen
+    index = cape_pts + td_pts + t_pts + gust_pts
+    
+    # Sicherheitssperre: Kein Gewitter bei extrem trockener Luft oder Null Energie
+    index = np.where((cape < 50) | (td_c < 10), 0, index)
+    
+    return lons, lats, np.clip(index, 0, 100)
 
 # --- PARAMETER-LOGIK ---
-def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pmsl=False):
+def load_parameter_data(run_time, forecast_hour, param_name, model_type, region_choice, show_pmsl=False):
     pmsl_data = None
     
+    # --- SONDERLOGIK: GEWITTER-MODELL ---
+    if model_type == "Gewitter (Unwetter-Index)":
+        base_model = "ICON-EU (+120h)" if region_choice == "Europa" else "ICON-D2 (2.2km)"
+        lons, lats, index_vals = calculate_thunder_index(run_time, forecast_hour, base_model)
+        return lons, lats, index_vals, "Gewitterrisiko in %", None
+
+    # --- STANDARD-MODELLE ---
     if show_pmsl and "GFS" not in model_type: 
         _, _, p_raw = get_raw_grib(run_time, forecast_hour, model_type, "PMSL")
         if p_raw is not None: pmsl_data = p_raw / 100.0 
@@ -247,34 +273,22 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, show_pm
     if "Temp" in param_name or param_name == "Taupunkt (2m)":
         vals = vals - 273.15
         title = "Temperatur in °C"
-        
-        if model_type == "KI-Downscaling (1x1km)":
-            _, _, td2m = get_raw_grib(run_time, forecast_hour, model_type, "Taupunkt (2m)")
-            if td2m is not None:
-                td2m = td2m - 273.15
-                lons, lats, vals = apply_ai_downscaling(lons, lats, vals, td2m)
-                
     elif "Windböen" in param_name:
         vals = vals * 3.6 
         title = "Windböen in km/h"
-        
     elif param_name == "Akk. Niederschlag (mm)":
         title = "Niederschlag in mm"
-        
     elif param_name == "Niederschlagsrate (mm/h)":
         if forecast_hour > 0:
             _, _, vals_h1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)")
             if isinstance(vals_h1, tuple): vals_h1 = vals_h1[0]
-            if vals_h1 is not None:
-                vals = np.clip(vals - vals_h1, 0, None)
+            if vals_h1 is not None: vals = np.clip(vals - vals_h1, 0, None)
         else:
             vals = np.zeros_like(vals)
         title = "Regenrate in mm/h"
-        
     elif "Geopot" in param_name:
         vals = vals / 9.80665 / 10.0 
         title = "Geopotential (gpdm)"
-        
     elif param_name == "MLCAPE":
         title = "CAPE (J/kg)"
         
@@ -319,15 +333,18 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
 
 # --- BENUTZEROBERFLÄCHE (UI) ---
 st.sidebar.header("⚙️ Allgemeine Einstellungen")
-model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)", "KI-Downscaling (1x1km)", "ICON-EU (+120h)", "GFS (+384h)", "AIFS (+360h)"])
+model_choice = st.sidebar.selectbox("Modell:", ["ICON-D2 (2.2km)", "Gewitter (Unwetter-Index)", "KI-Downscaling (1x1km)", "ICON-EU (+120h)", "GFS (+384h)", "AIFS (+360h)"])
 
 available_runs = get_available_runs(model_choice)
 run_label = st.sidebar.selectbox("Modelllauf:", list(available_runs.keys()))
 run_time = available_runs[run_label]
 
 param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE"]
-if "KI" in model_choice: param_list = ["Temperatur (2m)"]
-if "AIFS" in model_choice: param_list = ["Temperatur (2m)", "Windböen 10m", "500 hPa Geopot. Height", "850 hPa Temp."]
+
+# Dynamische Parameter je nach Modell
+if "KI-Downscaling" in model_choice: param_list = ["Temperatur (2m)"]
+elif "Gewitter" in model_choice: param_list = ["Unwetter-Index (%)"]
+elif "AIFS" in model_choice: param_list = ["Temperatur (2m)", "Windböen 10m", "500 hPa Geopot. Height", "850 hPa Temp."]
 param_choice = st.sidebar.selectbox("Parameter:", param_list)
 
 region_options = list(REGIONS.keys())
@@ -361,20 +378,24 @@ st.sidebar.divider()
 # --- HAUPTBEREICH ---
 st.info(f"Basis-Lauf: **{run_label}**")
 
-max_hours = {"ICON-D2 (2.2km)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
+max_hours = {"ICON-D2 (2.2km)": 48, "Gewitter (Unwetter-Index)": 48, "KI-Downscaling (1x1km)": 48, "ICON-EU (+120h)": 120, "GFS (+384h)": 384, "AIFS (+360h)": 360}
+# Falls Gewitter Modell gewählt ist und Europa, dann bis 120h (ICON-EU)
+if model_choice == "Gewitter (Unwetter-Index)" and region_choice == "Europa": max_hours[model_choice] = 120
+
 forecast_hour = st.slider("Vorhersagestunde", min_value=0, max_value=max_hours[model_choice], value=0, step=1, format="+%dh")
 
 time_local = (run_time + timedelta(hours=forecast_hour)).astimezone(ZoneInfo("Europe/Berlin"))
 st.success(f"**Gültig für:** +{forecast_hour}h ➔ {time_local.strftime('%d.%m.%Y um %H:00')} Uhr (MEZ/MESZ)")
 
 if "AIFS" in model_choice: st.info("ℹ️ AIFS lädt das gesamte GRIB2-Archiv. Die Generierung kann einige Sekunden länger dauern.")
+if "Gewitter" in model_choice: st.info("⚡ Die App berechnet diesen Index live aus: CAPE, Taupunkt, Temperatur und dynamischer Windscherung.")
 
 if st.button("🚀 Karte rendern", type="primary"):
-    with st.spinner("Lade Daten und rendere Karte..."):
-        lons, lats, data, title, pmsl = load_parameter_data(run_time, forecast_hour, param_choice, model_choice, show_pmsl)
+    with st.spinner("Lade Daten und rendere Karte (dies kann beim Gewitter-Index kurz dauern)..."):
+        lons, lats, data, title, pmsl = load_parameter_data(run_time, forecast_hour, param_choice, model_choice, region_choice, show_pmsl)
         if lons is not None:
             fig = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{forecast_hour}h | {time_local.strftime('%d.%m. %H:00')} Uhr", title, model_choice, region_choice, pmsl)
             st.pyplot(fig)
             st.toast("Erfolgreich generiert!", icon="✅")
         else:
-            st.error("Dieser Datensatz ist auf den Servern von DWD/NOAA/ECMWF für diese Stunde (noch) nicht verfügbar.")
+            st.error("Ein Datensatz für diesen Index ist auf den Servern für diese Stunde nicht (mehr/noch nicht) verfügbar.")
