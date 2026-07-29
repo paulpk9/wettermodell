@@ -1,0 +1,110 @@
+[
+    {
+        "value": -20.0,
+        "color": "#f730ff"
+    },
+    {
+        "value": -17.5,
+        "color": "#ae00bf"
+    },
+    {
+        "value": -15.0,
+        "color": "#8400bf"
+    },
+    {
+        "value": -12.5,
+        "color": "#4d00c7"
+    },
+    {
+        "value": -10.0,
+        "color": "#000cc3"
+    },
+    {
+        "value": -7.5,
+        "color": "#007fc3"
+    },
+    {
+        "value": -5.0,
+        "color": "#00b4c6"
+    },
+    {
+        "value": -2.5,
+        "color": "#007e63"
+    },
+    {
+        "value": 0.0,
+        "color": "#1a5800"
+    },
+    {
+        "value": 2.5,
+        "color": "#2a7b00"
+    },
+    {
+        "value": 5.0,
+        "color": "#00a607"
+    },
+    {
+        "value": 7.5,
+        "color": "#71cf00"
+    },
+    {
+        "value": 10.0,
+        "color": "#b4d100"
+    },
+    {
+        "value": 12.5,
+        "color": "#d5cf00"
+    },
+    {
+        "value": 15.0,
+        "color": "#dab100"
+    },
+    {
+        "value": 17.5,
+        "color": "#d18700"
+    },
+    {
+        "value": 20.0,
+        "color": "#d77300"
+    },
+    {
+        "value": 22.5,
+        "color": "#d45f00"
+    },
+    {
+        "value": 25.0,
+        "color": "#d12a00"
+    },
+    {
+        "value": 27.5,
+        "color": "#d30700"
+    },
+    {
+        "value": 30.0,
+        "color": "#8a0001"
+    },
+    {
+        "value": 32.5,
+        "color": "#740000"
+    },
+    {
+        "value": 35.0,
+        "color": "#4b0000"
+    },
+    {
+        "value": 37.5,
+        "color": "#4f002e"
+    },
+    {
+        "value": 40.0,
+        "color": "#7a0070"
+    },
+    {
+        "value": 42.5,
+        "color": "#a914a9"
+    },
+    {
+        "value": 45.0,
+        "color": "#ff46f7"
+    }
+]
