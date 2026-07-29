@@ -40,7 +40,11 @@ if "f_hour" not in st.session_state: st.session_state.f_hour = 0
 if "config" not in st.session_state: st.session_state.config = {}
 
 # --- DESIGN & KATEGORIEN DEFAULTS ---
-DEFAULT_DESIGN = {"bg_color": "#0E1117", "text_color": "#FFFFFF", "border_color": "#FFFFFF"}
+DEFAULT_DESIGN = {
+    "bg_color": "#0E1117", "title_bg": "#0E1117", "text_color": "#FFFFFF", 
+    "border_color": "#FFFFFF", "border_alpha": 0.4, "font_family": "sans-serif",
+    "cbar_step": 1, "number_color": "#000000", "number_outline": "#FFFFFF", "number_size": 9
+}
 if "design" not in st.session_state: st.session_state.design = DEFAULT_DESIGN.copy()
 
 SIG_WETTER_LABELS = {
@@ -67,8 +71,7 @@ DEFAULT_CONFIGS = {
 }
 
 REGIONS = {
-    "Europa": [-15.0, 30.0, 35.0, 65.0],
-    "Deutschland": [5.5, 15.5, 47.0, 55.0],
+    "Europa": [-15.0, 30.0, 35.0, 65.0], "Deutschland": [5.5, 15.5, 47.0, 55.0],
     "Baden-Württemberg": [7.5, 10.5, 47.5, 49.8], "Bayern": [8.5, 14.0, 47.0, 50.5],
     "Brandenburg / Berlin": [11.0, 15.0, 51.0, 53.5], "Hessen": [7.7, 10.2, 49.3, 51.7],
     "Niedersachsen / Bremen": [6.5, 11.6, 51.2, 54.0], "Nordrhein-Westfalen": [5.8, 9.5, 50.3, 52.5],
@@ -86,25 +89,34 @@ GERMAN_CITIES = {
 # --- GITHUB, CONFIGS & DOWNLOAD LOGIK ---
 def get_github_client(): return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
 
+def get_config_filepath(param_name):
+    safe_name = param_name.replace(" ", "_").replace("/", "_").replace(".", "")
+    return f"configs/config_{safe_name}.json"
+
 def load_param_config(param_name):
+    # Lade IMMER von GitHub aus dem configs/ Ordner. Falls nicht vorhanden, nutze Default.
     g = get_github_client()
     if g and "GITHUB_REPO" in st.secrets:
         try:
             repo = g.get_repo(st.secrets["GITHUB_REPO"])
-            data = json.loads(repo.get_contents(f"config_{param_name.replace(' ', '_').replace('/', '_')}.json").decoded_content.decode())
+            data = json.loads(repo.get_contents(get_config_filepath(param_name)).decoded_content.decode())
             if isinstance(data, list): return data
         except: pass
     return DEFAULT_CONFIGS.get(param_name, DEFAULT_CONFIGS["Temperatur (2m)"])
 
 def save_param_config(param_name, config_list):
+    # Überschreibt die Datei brutal im configs/ Ordner
     g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
     if g and repo_name:
         try:
             repo = g.get_repo(repo_name)
-            filename = f"config_{param_name.replace(' ', '_').replace('/', '_')}.json"
-            try: repo.update_file(filename, f"Update {param_name}", json.dumps(config_list, indent=4), repo.get_contents(filename).sha)
-            except: repo.create_file(filename, f"Create {param_name}", json.dumps(config_list, indent=4))
-            st.success(f"Farbskala erfolgreich gespeichert!")
+            filepath = get_config_filepath(param_name)
+            try: 
+                file = repo.get_contents(filepath)
+                repo.update_file(filepath, f"Update config for {param_name}", json.dumps(config_list, indent=4), file.sha)
+            except: 
+                repo.create_file(filepath, f"Create config for {param_name}", json.dumps(config_list, indent=4))
+            st.success(f"Farbskala erfolgreich im Ordner 'configs/' gespeichert!")
         except Exception as e: st.error(f"Fehler beim Speichern: {e}")
 
 @st.cache_data
@@ -153,8 +165,13 @@ def get_topography(model):
 
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
+    if "AIFS" in model: return download_and_extract(f"https://data.ecmwf.int/forecasts/{date_str}/{run_str}z/aifs/0p25/oper/{date_str}{run_str}0000-{str(forecast_hour)}h-oper-fc.grib2")
+    if "GFS" in model:
+        vm = {"Temperatur (2m)": "var_TMP=on&lev_2_m_above_ground=on", "Akk. Niederschlag (mm)": "var_APCP=on&lev_surface=on", "MLCAPE": "var_CAPE=on&lev_surface=on", "PMSL": "var_PRMSL=on&lev_mean_sea_level=on"}
+        fs = vm.get(param_name, "")
+        if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
+        return download_and_extract(f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}&{fs}" if fs else None)
     
-    # NEU: Wind Download Logik
     if param_name == "U-Wind": dm = {"U-Wind": ("u_10m", "10m_u", None)}
     elif param_name == "V-Wind": dm = {"V-Wind": ("v_10m", "10m_v", None)}
     else:
@@ -197,7 +214,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "MLCAPE": title = "CAPE (J/kg)"
     elif param_name == "Signifikantes Wetter":
         title = "Signifikantes Wetter"
-        # Logik-Umwandlung WMO 4677 in unsere 1-11 Kategorien
         ww = np.zeros_like(vals)
         ww[np.isin(vals, [50, 51, 58, 61, 80])] = 1
         ww[np.isin(vals, [52, 53, 59, 62, 81])] = 2
@@ -212,7 +228,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         ww[ww == 0] = np.nan
         vals = ww
 
-    # Lade Wind-Daten für Pfeile, falls aktiv
     u, v = None, None
     if overlays.get('wind') and param_name in ["Temperatur (2m)", "Windböen 10m", "Niederschlagsrate (mm/h)"]:
         _, _, raw_u = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind")
@@ -233,7 +248,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     min_v, max_v = min(levels), max(levels)
     if max_v == min_v: max_v += 1 
     
-    # Unterscheidung zwischen normaler Farbskala und kategorischem (Sig. Wetter)
     is_categorical = (legend_title == "Signifikantes Wetter")
     
     if is_categorical:
@@ -253,41 +267,40 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
     karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both' if not is_categorical else 'neither', alpha=0.95)
     
-    # Farbskala zeichnen
+    # Farbskala (Cbar) mit Schrittweiten-Logik
     if is_categorical:
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
         cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
     else:
-        cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
+        tick_step = int(design.get('cbar_step', 1))
+        visible_ticks = levels[::tick_step]
+        cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=visible_ticks, aspect=40)
     
-    cbar.set_label(legend_title, color=design['text_color'], size=11, fontweight='bold')
+    cbar.set_label(legend_title, color=design['text_color'], size=11, fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'))
     cbar.ax.xaxis.set_tick_params(color=design['text_color'], labelcolor=design['text_color'], labelsize=9)
+    for label in cbar.ax.get_xticklabels(): label.set_fontfamily(design.get('font_family', 'sans-serif'))
     
     # Grenzen
-    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=0.8, alpha=0.2)
-    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=1.2, alpha=0.4)
+    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=0.8, alpha=float(design.get('border_alpha', 0.4)))
+    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=1.2, alpha=float(design.get('border_alpha', 0.4)))
 
-    # 1. OVERLAY: Isobaren
     if overlays.get('pmsl_data') is not None:
         iso = ax.contour(lons, lats, overlays['pmsl_data'], levels=np.arange(900, 1100, 5), colors=design['text_color'], linewidths=1.0, alpha=0.6)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors=design['text_color'])
 
-    # 2. OVERLAY: Topographie / Höhenlinien (250m)
     if overlays.get('topo'):
         t_lons, t_lats, t_data = get_topography(model_type)
         if t_data is not None:
             topo = ax.contour(t_lons, t_lats, t_data, levels=np.arange(250, 4000, 250), colors=design['text_color'], alpha=0.25, linewidths=0.6)
 
-    # 3. OVERLAY: Windrichtungs-Pfeile
     u, v = overlays.get('u'), overlays.get('v')
     if u is not None and v is not None:
         try: dy = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
         except: dy = 2.2
-        step = max(1, int(35 / dy)) # Etwa alle 35 km ein Pfeil (perfekte Dichte)
+        step = max(1, int(35 / dy)) 
         ax.quiver(lons[::step, ::step], lats[::step, ::step], u[::step, ::step], v[::step, ::step], 
                   pivot='middle', color=design['text_color'], alpha=0.7, scale=400, width=0.003)
 
-    # 4. OVERLAY: Wichtige Städte
     if overlays.get('cities') and region == "Deutschland":
         c_lons = [coords[0] for coords in GERMAN_CITIES.values()]
         c_lats = [coords[1] for coords in GERMAN_CITIES.values()]
@@ -295,37 +308,42 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.plot(c_lons, c_lats, 'o', color=design['text_color'], markersize=3, alpha=0.8)
         for lon_c, lat_c, name in zip(c_lons, c_lats, c_names):
             ax.text(lon_c + 0.08, lat_c + 0.08, name, color=design['text_color'], fontsize=8, fontweight='bold',
+                    fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])])
 
-    # 5. OVERLAY: Zahlenwerte
-    if overlays.get('numbers') and not is_categorical:
+    # OVERLAY: 20x20km Zahlenwerte (NUR bei Temperatur)
+    if overlays.get('numbers') and legend_title == "Temperatur in °C":
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
-        try: dy = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
-        except: dy = 2.2
-        target_km = 12 if region == "Europa" else (5 if region == "Deutschland" else 2)
-        step = max(1, int(target_km / max(0.1, dy)))
+        
+        # Berechnung des exakten 20km Rasters
+        try: dy_km = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
+        except: dy_km = 2.2
+        if dy_km < 0.1: dy_km = 2.2
+        
+        step = max(1, int(20.0 / dy_km)) # 20km durch Modellauflösung
         
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
-        grid_mask = np.zeros_like(mask, dtype=bool); grid_mask[::step, ::step] = True
+        grid_mask = np.zeros_like(mask, dtype=bool)
+        grid_mask[::step, ::step] = True
         
-        for lon_val, lat_val, val in zip(lons[mask & grid_mask], lats[mask & grid_mask], data[mask & grid_mask]):
-            if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
-            if "CAPE" in legend_title and val < 50: continue
-            txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
-            ax.text(lon_val, lat_val, txt, fontsize=8, fontfamily='sans-serif', fontweight='bold', 
-                    color='black', ha='center', va='center', path_effects=[path_effects.withStroke(linewidth=1.5, foreground='white')])
+        valid_mask = mask & grid_mask
+        
+        for lon_val, lat_val, val in zip(lons[valid_mask], lats[valid_mask], data[valid_mask]):
+            txt = f"{val:.0f}"
+            ax.text(lon_val, lat_val, txt, fontsize=int(design.get('number_size', 9)), 
+                    fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
+                    color=design.get('number_color', '#000000'), ha='center', va='center', 
+                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))])
 
     ax.axis('off')
     
-    # Modernes Header-Label
-    bbox_props = dict(boxstyle="round,pad=0.4", fc=design['bg_color'], ec=design['border_color'], lw=0.5, alpha=0.85)
+    bbox_props = dict(boxstyle="round,pad=0.4", fc=design.get('title_bg', '#0E1117'), ec=design['border_color'], lw=0.5, alpha=0.85)
     ax.text(0.015, 0.985, f"{model_type} | {map_title_time}", transform=ax.transAxes, 
-            color=design['text_color'], fontsize=11, fontweight='bold', fontfamily='sans-serif', 
+            color=design['text_color'], fontsize=11, fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'), 
             ha='left', va='top', bbox=bbox_props)
     
     buf = io.BytesIO()
-    # Sicheres Speichern (Hintergrundfarbe dynamisch)
-    fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0.1, facecolor=design['bg_color'] if design['bg_color'] else '#0E1117')
+    fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0.1, facecolor=design['bg_color'])
     plt.close(fig)
     return buf.getvalue()
 
@@ -342,6 +360,7 @@ with tab_main:
     param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "Signifikantes Wetter"]
     param_choice = st.selectbox("Parameter:", param_list)
     
+    # Lädt die Konfiguration NUR hier exakt aus dem Ordner, manipuliert nichts von selbst.
     if param_choice not in st.session_state.config: 
         st.session_state.config[param_choice] = load_param_config(param_choice)
         
@@ -359,16 +378,32 @@ with tab_overlays:
     if param_choice in ["Temperatur (2m)", "Windböen 10m", "Niederschlagsrate (mm/h)"]:
         show_wind = st.toggle("🌬️ Windrichtungs-Pfeile", value=False)
         
-    show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False) if param_choice not in ["Signifikantes Wetter"] else False
+    show_numbers = False
+    if param_choice == "Temperatur (2m)":
+        show_numbers = st.toggle("🔢 20x20km Zahlenwerte auf Karte", value=False)
 
 with tab_design:
-    st.subheader("Farben & Stil")
-    st.session_state.design['bg_color'] = st.color_picker("Hintergrundfarbe", value=st.session_state.design['bg_color'])
-    st.session_state.design['text_color'] = st.color_picker("Text- & Linienfarbe", value=st.session_state.design['text_color'])
-    st.session_state.design['border_color'] = st.color_picker("Grenzen-Farbe", value=st.session_state.design['border_color'])
+    st.subheader("🎨 Grafik-Design")
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        st.session_state.design['bg_color'] = st.color_picker("Hintergrund", value=st.session_state.design['bg_color'])
+        st.session_state.design['title_bg'] = st.color_picker("Header-Box", value=st.session_state.design.get('title_bg', '#0E1117'))
+        st.session_state.design['text_color'] = st.color_picker("Text & Linien", value=st.session_state.design['text_color'])
+    with col_d2:
+        st.session_state.design['border_color'] = st.color_picker("Grenzen-Farbe", value=st.session_state.design['border_color'])
+        st.session_state.design['border_alpha'] = st.slider("Grenzen-Deckkraft", 0.0, 1.0, float(st.session_state.design.get('border_alpha', 0.4)), 0.1)
+        st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
     st.divider()
-    st.subheader(f"Skala: {param_choice}")
+    st.subheader("🔢 Zahlen-Design (Temperatur)")
+    c_z1, c_z2, c_z3 = st.columns(3)
+    with c_z1: st.session_state.design['number_color'] = st.color_picker("Zahlfarbe", value=st.session_state.design.get('number_color', '#000000'))
+    with c_z2: st.session_state.design['number_outline'] = st.color_picker("Umrandung", value=st.session_state.design.get('number_outline', '#FFFFFF'))
+    with c_z3: st.session_state.design['number_size'] = st.number_input("Größe", 5, 20, int(st.session_state.design.get('number_size', 9)))
+
+    st.divider()
+    st.subheader(f"📊 Farbskala: {param_choice}")
+    st.session_state.design['cbar_step'] = st.number_input("Zeige jeden X-ten Wert als Zahl an:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
     
     new_config = []
     for i, item in enumerate(st.session_state.config[param_choice]):
@@ -381,6 +416,7 @@ with tab_design:
                 st.rerun()
         new_config.append({"value": val, "color": col})
     
+    # Nichts wird manipuliert. Die App übernimmt nur die exakten Werte aus der Eingabe.
     st.session_state.config[param_choice] = new_config
     
     col_btn1, col_btn2 = st.columns(2)
@@ -408,8 +444,8 @@ selected_datetime = st.slider("Zeitpunkt", min_value=start_time_local, max_value
 chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
 st.session_state.f_hour = chosen_f_hour
 
-config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_wind) + str(show_cities) + str(show_topo))
-cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{show_numbers}_{config_hash}"
+config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_wind) + str(show_cities) + str(show_topo) + str(show_numbers))
+cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
 if cache_key in st.session_state.map_cache:
     st.image(st.session_state.map_cache[cache_key], use_container_width=True)
