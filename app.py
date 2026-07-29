@@ -32,8 +32,6 @@ st.markdown("""
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2); letter-spacing: 0.5px;
         }
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
-        
-        /* Hex-Code Eingabefeld beim Color-Picker ausblenden (verhindert Handytastatur-Nerven) */
         [data-testid="stColorPicker"] input { display: none !important; }
     </style>
 """, unsafe_allow_html=True)
@@ -76,10 +74,10 @@ DEFAULT_CONFIGS = {
     "CIN": [{"value": 0.0, "color": "#ffffff"}, {"value": 50.0, "color": "#a6cee3"}, {"value": 200.0, "color": "#1f78b4"}, {"value": 500.0, "color": "#08306b"}],
     "CAPE & CIN (Deckel)": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}],
     "Signifikantes Wetter": [
-        {"value": 1, "color": "#a1d99b"}, {"value": 2, "color": "#31a354"}, {"value": 3, "color": "#006d2c"},
-        {"value": 4, "color": "#fcc5c0"}, {"value": 5, "color": "#f768a1"}, {"value": 6, "color": "#ae017e"},
-        {"value": 7, "color": "#c6dbef"}, {"value": 8, "color": "#6baed6"}, {"value": 9, "color": "#2171b5"},
-        {"value": 10, "color": "#fd8d3c"}, {"value": 11, "color": "#e31a1c"}
+        {"value": 1.0, "color": "#a1d99b"}, {"value": 2.0, "color": "#31a354"}, {"value": 3.0, "color": "#006d2c"},
+        {"value": 4.0, "color": "#fcc5c0"}, {"value": 5.0, "color": "#f768a1"}, {"value": 6.0, "color": "#ae017e"},
+        {"value": 7.0, "color": "#c6dbef"}, {"value": 8.0, "color": "#6baed6"}, {"value": 9.0, "color": "#2171b5"},
+        {"value": 10.0, "color": "#fd8d3c"}, {"value": 11.0, "color": "#e31a1c"}
     ]
 }
 
@@ -152,11 +150,12 @@ def load_borders():
 
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    if "RUC" in model_name: step, delay = 1, 1.5
+    # RUC Delay auf 2.5 Stunden erhöht, um DWD-Serververzögerungen und 404-Fehler zu vermeiden
+    if "RUC" in model_name: step, delay = 1, 2.5
     elif "AIFS" in model_name: step, delay = 12, 9.5
-    elif "GFS" in model_name: step, delay = 6, 5.0
-    elif "EU" in model_name: step, delay = 6, 3.0
-    else: step, delay = 3, 2.0
+    elif "GFS" in model_name: step, delay = 6, 5.5
+    elif "EU" in model_name: step, delay = 6, 3.5
+    else: step, delay = 3, 2.5
     
     eff_now = now - timedelta(hours=delay)
     latest = eff_now.replace(hour=(eff_now.hour // step) * step, minute=0, second=0, microsecond=0)
@@ -265,6 +264,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         ww[np.isin(vals, [54, 55, 63, 64, 65, 82])] = 3
         ww[np.isin(vals, [68, 83])] = 4
         ww[np.isin(vals, [69, 84])] = 5
+        ww[np.isin(vals, [84])] = 6
         ww[np.isin(vals, [70, 71, 85])] = 7
         ww[np.isin(vals, [72, 73, 86])] = 8
         ww[np.isin(vals, [74, 75])] = 9
@@ -303,7 +303,8 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
     if is_categorical:
-        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='neither', alpha=0.95)
+        # Pcolormesh ist zwingend nötig für kategoriale Daten (verhindert Interpolationsfehler & unsichtbare Flächen)
+        karte = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, alpha=0.95, shading='auto')
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
         cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
     else:
@@ -342,7 +343,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])])
 
-    # OVERLAY: Zahlenwerte (Peaks für Regenrate, Raster für den Rest)
+    # OVERLAY: Zahlenwerte (Peaks für Niederschlag/Regen, Raster für den Rest)
     if overlays.get('numbers') and not is_categorical:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         
@@ -352,13 +353,13 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
         
-        if legend_title == "Regenrate in mm/h":
+        if legend_title == "Regenrate in mm/h" or legend_title == "Niederschlag in mm":
             # Peak Finding: Sucht die isolierten Kerne von Niederschlagszellen (Abstand ca. 40km)
             size_px = max(3, int(40.0 / dy_km))
             local_max = ndimage.maximum_filter(data, size=size_px) == data
             valid_mask = mask & local_max & (data >= 0.1)
         else:
-            # Raster System: Für Temperatur, Böen, Akk. NS (Fester, großer 60km Abstand)
+            # Raster System: Für Temperatur, Böen (Fester, großer 60km Abstand)
             target_km = 60.0 
             step = max(1, int(target_km / dy_km)) 
             grid_mask = np.zeros_like(mask, dtype=bool)
@@ -393,7 +394,7 @@ tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Over
 
 with tab_main:
     # Popover-Dropdown: Modell (Inklusive D2-RUC)
-    with st.popover(f"🌍 Modell: {st.session_state.model_choice}", use_container_width=True):
+    with st.popover(f"🌍 Modell: {st.session_state.model_choice}"):
         idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
         st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
     if st.session_state.m_radio != st.session_state.model_choice:
@@ -408,7 +409,7 @@ with tab_main:
     
     # Popover-Dropdown: Parameter
     param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Signifikantes Wetter"]
-    with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", use_container_width=True):
+    with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}"):
         idx_p = param_list.index(st.session_state.param_choice) if st.session_state.param_choice in param_list else 0
         st.radio("Parameter", param_list, index=idx_p, key="p_radio", label_visibility="collapsed")
     if st.session_state.p_radio != st.session_state.param_choice:
@@ -425,7 +426,7 @@ with tab_main:
     if "D2" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
-    with st.popover(f"📍 Region: {st.session_state.region_choice}", use_container_width=True):
+    with st.popover(f"📍 Region: {st.session_state.region_choice}"):
         idx_r = region_options.index(st.session_state.region_choice)
         st.radio("Region", region_options, index=idx_r, key="r_radio", label_visibility="collapsed")
     if st.session_state.r_radio != st.session_state.region_choice:
@@ -497,9 +498,11 @@ with tab_design:
         
         if param_choice == "Signifikantes Wetter":
             with c1: 
-                lbl = SIG_WETTER_LABELS.get(int(item['value']), f"Kategorie {int(item['value'])}")
-                st.markdown(f"<div style='padding-top:8px; font-size:14px;'>{lbl}</div>", unsafe_allow_html=True)
-                val = item['value']
+                # Das Dropdown für die Kategorien-Auswahl beim Signifikanten Wetter!
+                val = st.selectbox("W", options=list(SIG_WETTER_LABELS.keys()), 
+                                   index=list(SIG_WETTER_LABELS.keys()).index(int(item['value'])) if int(item['value']) in SIG_WETTER_LABELS else 0,
+                                   format_func=lambda x: SIG_WETTER_LABELS.get(x, str(x)),
+                                   key=f"v_{item_id}", label_visibility="collapsed")
         else:
             with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{item_id}", label_visibility="collapsed")
             
@@ -542,9 +545,9 @@ config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_s
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
 if cache_key in st.session_state.map_cache:
-    st.image(st.session_state.map_cache[cache_key], use_container_width=True)
+    st.image(st.session_state.map_cache[cache_key], use_column_width=True)
 else:
-    if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary", use_container_width=True):
+    if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary"):
         with st.spinner("Lade GRIB-Daten und rendere Karte..."):
             overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo}
             lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, overlays_dict)
@@ -556,4 +559,4 @@ else:
                 st.session_state.map_cache[cache_key] = img_bytes
                 st.rerun() 
             else:
-                st.error("Ein Datensatz für diesen Parameter ist auf den Servern noch nicht verfügbar.")
+                st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar[span_0](start_span)[span_0](end_span).")
