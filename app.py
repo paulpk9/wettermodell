@@ -10,6 +10,7 @@ import requests
 import bz2
 import tempfile
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import xarray as xr
@@ -31,18 +32,18 @@ st.markdown("""
         }
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
         
-        /* Hex-Code Eingabefeld beim Color-Picker ausblenden, um Tastatur-Popup am Handy zu verhindern! */
+        /* Hex-Code Eingabefeld beim Color-Picker ausblenden (verhindert Handytastatur-Nerven) */
         [data-testid="stColorPicker"] input { display: none !important; }
     </style>
 """, unsafe_allow_html=True)
 
 st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
 
+# --- SYSTEM STATES ---
 if "map_cache" not in st.session_state: st.session_state.map_cache = {}
 if "f_hour" not in st.session_state: st.session_state.f_hour = 0
 if "config" not in st.session_state: st.session_state.config = {}
 
-# Initiale States für die neuen Dropdown-Popovers
 if "model_choice" not in st.session_state: st.session_state.model_choice = "ICON-D2 (2.2km)"
 if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
 if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
@@ -129,13 +130,16 @@ def save_param_config(param_name, config_list):
     g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
     if g and repo_name:
         try:
+            # Erstelle eine reine Kopie für Github ohne die UI-UUIDs!
+            clean_list = [{"value": float(c["value"]), "color": c["color"]} for c in config_list]
+            
             repo = g.get_repo(repo_name)
             filepath = get_config_filepath(param_name)
             try: 
                 file = repo.get_contents(filepath)
-                repo.update_file(filepath, f"Update config for {param_name}", json.dumps(config_list, indent=4), file.sha)
+                repo.update_file(filepath, f"Update config for {param_name}", json.dumps(clean_list, indent=4), file.sha)
             except: 
-                repo.create_file(filepath, f"Create config for {param_name}", json.dumps(config_list, indent=4))
+                repo.create_file(filepath, f"Create config for {param_name}", json.dumps(clean_list, indent=4))
             st.success(f"Farbskala erfolgreich in {filepath} gespeichert!")
         except Exception as e: st.error(f"Fehler beim Speichern: {e}")
 
@@ -186,7 +190,6 @@ def get_topography(model):
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
     
-    # Sonderregel für Kombi-Parameter
     if param_name == "CAPE & CIN (Deckel)": return None, None, None
 
     if "GFS" in model:
@@ -334,7 +337,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])])
 
-    # OVERLAY: Zahlenwerte (Mit größerem Abstand & Schriftgröße 5 fix)
+    # OVERLAY: Zahlenwerte (Riesiger Abstand, fix Schriftgröße 5)
     if overlays.get('numbers') and not is_categorical:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         
@@ -342,7 +345,8 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         except: dy_km = 2.2
         if dy_km < 0.1: dy_km = 2.2
         
-        target_km = 60.0 # <-- Hier der großzügige Abstand (verhindert Überlappungen absolut)
+        # 60 km Abstand für die Zahlen, das lässt definitiv genug Freiraum!
+        target_km = 60.0 
         step = max(1, int(target_km / dy_km)) 
         
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
@@ -356,7 +360,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
             if "CAPE" in legend_title and val < 50: continue
             txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
             
-            # Feste Schriftgröße 5, wie gewünscht
+            # Feste Schriftgröße 5
             ax.text(lon_val, lat_val, txt, fontsize=5, fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
                     color=design.get('number_color', '#000000'), ha='center', va='center', 
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))])
@@ -378,29 +382,47 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # Popover-Dropdowns für saubere Handyanzeige
+    # Popover-Dropdown: Modell
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}", use_container_width=True):
-        st.session_state.model_choice = st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"], label_visibility="collapsed")
+        idx_m = ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
+        st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
+    if st.session_state.m_radio != st.session_state.model_choice:
+        st.session_state.model_choice = st.session_state.m_radio
+        st.rerun()
+
     model_choice = st.session_state.model_choice
 
     available_runs = get_available_runs(model_choice)
     run_label = st.selectbox("Modelllauf:", list(available_runs.keys()))
     run_time = available_runs[run_label]
     
+    # Popover-Dropdown: Parameter
     param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Signifikantes Wetter"]
     with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", use_container_width=True):
-        st.session_state.param_choice = st.radio("Parameter", param_list, label_visibility="collapsed")
+        idx_p = param_list.index(st.session_state.param_choice) if st.session_state.param_choice in param_list else 0
+        st.radio("Parameter", param_list, index=idx_p, key="p_radio", label_visibility="collapsed")
+    if st.session_state.p_radio != st.session_state.param_choice:
+        st.session_state.param_choice = st.session_state.p_radio
+        st.rerun()
+        
     param_choice = st.session_state.param_choice
     
+    # Lädt die Konfiguration immer strikt aus dem GitHub Ordner
     if param_choice not in st.session_state.config: 
         st.session_state.config[param_choice] = load_param_config(param_choice)
         
+    # Popover-Dropdown: Region
     region_options = list(REGIONS.keys())
     if "D2" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
     with st.popover(f"📍 Region: {st.session_state.region_choice}", use_container_width=True):
-        st.session_state.region_choice = st.radio("Region", region_options, label_visibility="collapsed")
+        idx_r = region_options.index(st.session_state.region_choice)
+        st.radio("Region", region_options, index=idx_r, key="r_radio", label_visibility="collapsed")
+    if st.session_state.r_radio != st.session_state.region_choice:
+        st.session_state.region_choice = st.session_state.r_radio
+        st.rerun()
+        
     region_choice = st.session_state.region_choice
 
 with tab_overlays:
@@ -429,7 +451,7 @@ with tab_design:
                     st.rerun()
                 except Exception as e: st.error(f"Fehler: {e}")
     else:
-        st.write("Keine gespeicherten Skalen gefunden.")
+        st.write("Keine gespeicherten Skalen auf GitHub gefunden.")
 
     st.divider()
     st.subheader("🎨 Grafik-Design")
@@ -456,23 +478,29 @@ with tab_design:
     st.subheader(f"📊 Skala anpassen")
     st.session_state.design['cbar_step'] = st.number_input("Zeige nur jeden X-ten Wert als Zahl:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
     
+    # 1. UI-Bugfix für Listen: Eindeutige UUIDs zuweisen, falls noch nicht vorhanden
+    for item in st.session_state.config[param_choice]:
+        if "_id" not in item: item["_id"] = str(uuid.uuid4())
+    
     new_config = []
+    # 2. UI-Bugfix für Listen: UUID als fixen Key verwenden!
     for i, item in enumerate(st.session_state.config[param_choice]):
+        item_id = item["_id"]
         c1, c2, c3 = st.columns([2, 2, 1])
-        with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{i}", label_visibility="collapsed")
-        with c2: col = st.color_picker("F", value=item['color'], key=f"c_{i}", label_visibility="collapsed")
+        with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{item_id}", label_visibility="collapsed")
+        with c2: col = st.color_picker("F", value=item['color'], key=f"c_{item_id}", label_visibility="collapsed")
         with c3:
-            if st.button("🗑️", key=f"d_{i}"): 
+            if st.button("🗑️", key=f"d_{item_id}"): 
                 st.session_state.config[param_choice].pop(i)
                 st.rerun()
-        new_config.append({"value": val, "color": col})
+        new_config.append({"value": val, "color": col, "_id": item_id})
     
     st.session_state.config[param_choice] = new_config
     
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("➕ Neu"): 
-            st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff"})
+            st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())})
             st.rerun()
     with col_btn2:
         if st.button("💾 Speichern"): save_param_config(param_choice, st.session_state.config[param_choice])
@@ -495,6 +523,7 @@ selected_datetime = st.slider("Zeitpunkt", min_value=start_time_local, max_value
 chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
 st.session_state.f_hour = chosen_f_hour
 
+# Sicherer Cache, der JEDE Änderung (Design, Farbe, Overlays) sofort bemerkt
 config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers))
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
