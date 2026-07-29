@@ -11,6 +11,7 @@ import bz2
 import tempfile
 import os
 import uuid
+import pandas as pd
 from PIL import Image
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -56,7 +57,7 @@ def load_design_config():
         try:
             repo = g.get_repo(st.secrets["GITHUB_REPO"])
             data = json.loads(repo.get_contents("configs/design_config.json").decoded_content.decode())
-            return {**DEFAULT_DESIGN, **data} # Fügt neue Defaults hinzu, falls sie in der alten JSON fehlen
+            return {**DEFAULT_DESIGN, **data}
         except: pass
     return DEFAULT_DESIGN.copy()
 
@@ -175,12 +176,21 @@ def load_borders():
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_satellite_bg(lon_min, lon_max, lat_min, lat_max):
-    # Holt ein echtes S2-Satellitenbild von EOX als Hintergrundbild
     url = f"https://s2maps-tiles.eu/wms/?service=WMS&request=GetMap&version=1.1.1&layers=s2cloudless-2020_3857&styles=&format=image/jpeg&transparent=false&width=1000&height=1000&srs=EPSG:4326&bbox={lon_min},{lat_min},{lon_max},{lat_max}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             return np.array(Image.open(io.BytesIO(resp.content)))
+    except: pass
+    return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_ensemble_data(lat, lon, param, model):
+    url = f"https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat}&longitude={lon}&hourly={param}&models={model}"
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
     except: pass
     return None
 
@@ -320,8 +330,9 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     is_categorical = (legend_title == "Signifikantes Wetter")
     is_discrete = design.get('discrete_colors', False)
     
-    # NEU: Maskiere Niederschlag < 0.1, damit das Satellitenbild sichtbar wird
-    if overlays.get('satellite') and ("Niederschlag" in legend_title or "Regen" in legend_title):
+    # NEU: SATELLITEN-FIX - Mache Daten <0.1 komplett transparent und verstecke die Achsen-Hintergrundfarbe
+    is_satellite_active = overlays.get('satellite') and region == "Deutschland" and ("Niederschlag" in legend_title or "Regen" in legend_title)
+    if is_satellite_active:
         data = np.where(data < 0.1, np.nan, data)
     
     if is_categorical:
@@ -334,29 +345,35 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
     else:
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", list(zip([(v - min_v) / (max_v - min_v) for v in levels], colors)))
+        if is_satellite_active:
+            cmap.set_bad('none') # Zwingt Matplotlib dazu, NaNs wirklich transparent zu lassen
         contour_levels = np.linspace(min_v, max_v, 150)
 
     fig, ax = plt.subplots(figsize=(10, 10))
     fig.patch.set_facecolor(design['bg_color'])
-    ax.set_facecolor(design['bg_color'])
+    
+    # FIX: Wenn Satellit an ist, darf die Achse keinen Hintergrund haben, sonst blockiert sie das Sat-Bild!
+    if is_satellite_active:
+        ax.set_facecolor('none')
+    else:
+        ax.set_facecolor(design['bg_color'])
     
     if region in REGIONS: 
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
-    # NEU: Echtes Satellitenbild als Hintergrund (Falls aktiv & Maske frei)
-    if overlays.get('satellite') and region == "Deutschland" and ("Niederschlag" in legend_title or "Regen" in legend_title):
+    if is_satellite_active:
         sat_img = get_satellite_bg(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
         if sat_img is not None:
             ax.imshow(sat_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=0)
         
     if is_categorical or is_discrete:
-        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='max' if not is_categorical else 'neither', alpha=0.9 if overlays.get('satellite') else 0.95, zorder=1)
+        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='max' if not is_categorical else 'neither', alpha=0.9 if is_satellite_active else 0.95, zorder=1)
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
         if is_categorical:
             cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
     else:
-        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both', alpha=0.9 if overlays.get('satellite') else 0.95, zorder=1)
+        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='max' if is_satellite_active else 'both', alpha=0.9 if is_satellite_active else 0.95, zorder=1)
         tick_step = int(design.get('cbar_step', 1))
         visible_ticks = levels[::tick_step]
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=visible_ticks, aspect=40)
@@ -417,7 +434,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     color=design.get('number_color', '#000000'), ha='center', va='center', 
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))], zorder=5)
 
-    # NEU: Eigenes Wasserzeichen
     if design.get('watermark'):
         ax.text(0.5, 0.02, design['watermark'], transform=ax.transAxes, color=design['text_color'], 
                 fontsize=10, fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'),
@@ -425,7 +441,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
 
     ax.axis('off')
     
-    # NEU: Glassmorphism beim Header
     bg_rgba = mcolors.to_rgba(design.get('title_bg', '#0E1117'), alpha=0.4)
     ec_rgba = mcolors.to_rgba(design['border_color'], alpha=0.6)
     bbox_props = dict(boxstyle="round,pad=0.5", fc=bg_rgba, ec=ec_rgba, lw=1.2)
@@ -493,13 +508,11 @@ with tab_overlays:
     if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
         
-    # NEU: Satellitenbild-Schalter (nur Deutschland & Niederschlag)
     show_satellite = False
     if region_choice == "Deutschland" and param_choice in ["Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_satellite = st.toggle("🛰️ Satellitenbild-Hintergrund", value=False)
 
 with tab_design:
-    # NEU: Theme Selektor
     st.subheader("🖥️ Basis-Themes")
     theme_choice = st.selectbox("Farbschema wählen:", ["Benutzerdefiniert / Gespeichert", "OLED Dark", "Light / Papier", "Satellite / Retro"])
     if theme_choice != st.session_state.get('last_theme', 'Benutzerdefiniert / Gespeichert'):
@@ -524,11 +537,8 @@ with tab_design:
         st.session_state.design['title_size'] = st.number_input("Header Schriftgröße", 5, 20, int(st.session_state.design.get('title_size', 11)))
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
-    # NEU: Wasserzeichen
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
-    
-    if st.button("💾 Design & Wasserzeichen Speichern"):
-        save_design_config(st.session_state.design)
+    if st.button("💾 Design & Wasserzeichen Speichern"): save_design_config(st.session_state.design)
 
     st.divider()
     st.subheader("🔢 Zahlen-Design")
@@ -539,10 +549,8 @@ with tab_design:
     st.divider()
     st.subheader(f"📊 Skala: {param_choice}")
     c_sk1, c_sk2 = st.columns(2)
-    with c_sk1:
-        st.session_state.design['discrete_colors'] = st.toggle("Harte Farbkanten (Diskret)", value=st.session_state.design.get('discrete_colors', False))
-    with c_sk2:
-        st.session_state.design['cbar_step'] = st.number_input("Zeige jeden X-ten Wert:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
+    with c_sk1: st.session_state.design['discrete_colors'] = st.toggle("Harte Farbkanten (Diskret)", value=st.session_state.design.get('discrete_colors', False))
+    with c_sk2: st.session_state.design['cbar_step'] = st.number_input("Zeige jeden X-ten Wert:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
     st.session_state.design['cbar_size'] = st.number_input("Skala Schriftgröße", 5, 20, int(st.session_state.design.get('cbar_size', 11)))
     
     for item in st.session_state.config[param_choice]:
@@ -552,30 +560,19 @@ with tab_design:
     for i, item in enumerate(st.session_state.config[param_choice]):
         item_id = item["_id"]
         c1, c2, c3 = st.columns([2, 2, 1])
-        
         if param_choice == "Signifikantes Wetter":
-            with c1: 
-                val = st.selectbox("W", options=list(SIG_WETTER_LABELS.keys()), 
-                                   index=list(SIG_WETTER_LABELS.keys()).index(int(item['value'])) if int(item['value']) in SIG_WETTER_LABELS else 0,
-                                   format_func=lambda x: SIG_WETTER_LABELS.get(x, str(x)),
-                                   key=f"v_{item_id}", label_visibility="collapsed")
+            with c1: val = st.selectbox("W", options=list(SIG_WETTER_LABELS.keys()), index=list(SIG_WETTER_LABELS.keys()).index(int(item['value'])) if int(item['value']) in SIG_WETTER_LABELS else 0, format_func=lambda x: SIG_WETTER_LABELS.get(x, str(x)), key=f"v_{item_id}", label_visibility="collapsed")
         else:
             with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{item_id}", label_visibility="collapsed")
-            
         with c2: col = st.color_picker("F", value=item['color'], key=f"c_{item_id}", label_visibility="collapsed")
         with c3:
-            if st.button("🗑️", key=f"d_{item_id}"): 
-                st.session_state.config[param_choice].pop(i)
-                st.rerun()
+            if st.button("🗑️", key=f"d_{item_id}"): st.session_state.config[param_choice].pop(i); st.rerun()
         new_config.append({"value": val, "color": col, "_id": item_id})
     
     st.session_state.config[param_choice] = new_config
-    
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        if st.button("➕ Neu"): 
-            st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())})
-            st.rerun()
+        if st.button("➕ Neu"): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
     with col_btn2:
         if st.button("💾 Skala Speichern"): save_param_config(param_choice, st.session_state.config[param_choice])
         
@@ -589,46 +586,103 @@ with tab_design:
                 try:
                     g = get_github_client()
                     repo = g.get_repo(st.secrets["GITHUB_REPO"])
-                    loaded_data = json.loads(repo.get_contents(f"configs/{selected_file}").decoded_content.decode())
-                    st.session_state.config[param_choice] = loaded_data
-                    st.success(f"{selected_file} erfolgreich geladen!")
-                    st.rerun()
+                    st.session_state.config[param_choice] = json.loads(repo.get_contents(f"configs/{selected_file}").decoded_content.decode())
+                    st.success(f"{selected_file} geladen!"); st.rerun()
                 except Exception as e: st.error(f"Fehler: {e}")
 
-# --- HAUPTBEREICH & SCHIEBEREGLER ---
-max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else (27 if "RUC" in model_choice else 48))
-step_h = 3 if "GFS" in model_choice else 1
-tz_berlin = ZoneInfo("Europe/Berlin")
-start_time_local = run_time.astimezone(tz_berlin)
+# --- HAUPTBEREICH TABS ---
+tab_map, tab_ens = st.tabs(["🗺️ Karten-Terminal", "📈 Ensemble (Spaghetti)"])
 
-st.markdown(f"""
-    <div class="glass-banner" style="color: {st.session_state.design['text_color']}; border-color: {st.session_state.design['border_color']};">
-        🌤️ {model_choice} | 🌡️ {param_choice}
-    </div>
-""", unsafe_allow_html=True)
+with tab_map:
+    max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else (27 if "RUC" in model_choice else 48))
+    step_h = 3 if "GFS" in model_choice else 1
+    tz_berlin = ZoneInfo("Europe/Berlin")
+    start_time_local = run_time.astimezone(tz_berlin)
 
-selected_datetime = st.slider("Zeitpunkt", min_value=start_time_local, max_value=start_time_local + timedelta(hours=max_h), 
-                              value=start_time_local + timedelta(hours=min(st.session_state.f_hour, max_h)), step=timedelta(hours=step_h), format="ddd, DD.MM. - HH:mm")
+    st.markdown(f"""
+        <div class="glass-banner" style="color: {st.session_state.design['text_color']}; border-color: {st.session_state.design['border_color']};">
+            🌤️ {model_choice} | 🌡️ {param_choice}
+        </div>
+    """, unsafe_allow_html=True)
 
-chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
-st.session_state.f_hour = chosen_f_hour
+    selected_datetime = st.slider("Zeitpunkt", min_value=start_time_local, max_value=start_time_local + timedelta(hours=max_h), 
+                                  value=start_time_local + timedelta(hours=min(st.session_state.f_hour, max_h)), step=timedelta(hours=step_h), format="ddd, DD.MM. - HH:mm")
 
-config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers) + str(show_satellite))
-cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
+    chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
+    st.session_state.f_hour = chosen_f_hour
 
-if cache_key in st.session_state.map_cache:
-    st.image(st.session_state.map_cache[cache_key], use_column_width=True)
-else:
-    if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary"):
-        with st.spinner("Lade GRIB-Daten und rendere Karte..."):
-            overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo, "satellite": show_satellite}
-            lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, overlays_dict)
+    config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers) + str(show_satellite))
+    cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
+
+    if cache_key in st.session_state.map_cache:
+        st.image(st.session_state.map_cache[cache_key]["image"], use_container_width=True)
+        if st.session_state.map_cache[cache_key].get("extremes"):
+            st.info(f"**Extremwerte (Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
+    else:
+        if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary"):
+            with st.spinner("Lade GRIB-Daten und rendere Karte..."):
+                overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo, "satellite": show_satellite}
+                lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, overlays_dict)
+                
+                if lons is not None:
+                    # Extremwerte für Deutschland berechnen (Nur wenn Region DE gewählt)
+                    extremes_txt = None
+                    if region_choice == "Deutschland":
+                        xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
+                        mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
+                        if np.any(mask):
+                            extremes_txt = f"Min: {np.nanmin(data[mask]):.1f} | Max: {np.nanmax(data[mask]):.1f}"
+
+                    overlays_dict['pmsl_data'], overlays_dict['extra_data'] = pmsl, extra_overlay
+                    t_str = selected_datetime.strftime('%d.%m. %H:00')
+                    img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict, st.session_state.design)
+                    
+                    st.session_state.map_cache[cache_key] = {"image": img_bytes, "extremes": extremes_txt}
+                    st.rerun() 
+                else:
+                    st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar[span_1](start_span)[span_1](end_span).")
+
+with tab_ens:
+    st.markdown("### 📈 Profi-Ensemble Prognose")
+    col_e1, col_e2, col_e3 = st.columns(3)
+    
+    with col_e1: ens_city = st.selectbox("Ort:", list(GERMAN_CITIES.keys()))
+    with col_e2: ens_model = st.selectbox("Modell-Ensemble:", ["ICON-EPS (DWD)", "GFS-Seamless (NOAA)", "ECMWF-EPS"])
+    with col_e3: ens_param = st.selectbox("Wetter-Parameter:", ["Temperatur (2m)", "Niederschlag (mm/h)", "Windböen (km/h)", "CAPE (J/kg)"])
+    
+    om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "GFS-Seamless (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
+    om_param_map = {"Temperatur (2m)": "temperature_2m", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
+    
+    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary"):
+        with st.spinner(f"Lade alle Modell-Mitglieder für {ens_city}..."):
+            lon_c, lat_c = GERMAN_CITIES[ens_city]
+            ens_data = fetch_ensemble_data(lat_c, lon_c, om_param_map[ens_param], om_model_map[ens_model])
             
-            if lons is not None:
-                overlays_dict['pmsl_data'], overlays_dict['extra_data'] = pmsl, extra_overlay
-                t_str = selected_datetime.strftime('%d.%m. %H:00')
-                img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict, st.session_state.design)
-                st.session_state.map_cache[cache_key] = img_bytes
-                st.rerun() 
+            if ens_data and 'hourly' in ens_data:
+                hourly = ens_data['hourly']
+                times = pd.to_datetime(hourly['time'])
+                member_keys = [k for k in hourly.keys() if k.startswith(om_param_map[ens_param])]
+                
+                fig, ax = plt.subplots(figsize=(12, 5))
+                fig.patch.set_facecolor(st.session_state.design['bg_color'])
+                ax.set_facecolor(st.session_state.design['bg_color'])
+                
+                all_series = []
+                for mk in member_keys:
+                    vals = np.array(hourly[mk])
+                    if ens_param == "Windböen (km/h)" and "icon" not in ens_model.lower(): vals = vals * 3.6
+                    all_series.append(vals)
+                    ax.plot(times, vals, color=st.session_state.design['text_color'], alpha=0.15, linewidth=1)
+                
+                mean_vals = np.nanmean(all_series, axis=0)
+                ax.plot(times, mean_vals, color='#e31a1c' if "Temp" in ens_param else '#1f78b4', linewidth=2.5, label="Ensemble-Mittel")
+                
+                ax.set_title(f"{ens_model} | {ens_param} | {ens_city}", color=st.session_state.design['text_color'], fontweight='bold', pad=15)
+                ax.tick_params(colors=st.session_state.design['text_color'])
+                for spine in ax.spines.values(): spine.set_color(st.session_state.design['border_color'])
+                
+                ax.legend(facecolor=st.session_state.design['bg_color'], labelcolor=st.session_state.design['text_color'], edgecolor=st.session_state.design['border_color'])
+                ax.grid(color=st.session_state.design['text_color'], alpha=0.1, linestyle='--')
+                st.pyplot(fig)
             else:
-                st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar.")
+                st.error("Fehler beim Abruf der Ensemble-Daten von der Open-Meteo API.")
