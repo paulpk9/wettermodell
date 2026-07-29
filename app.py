@@ -190,7 +190,7 @@ def get_satellite_bg(lon_min, lon_max, lat_min, lat_max):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ensemble_data(lat, lon, param, model):
-    # FIX: Exaktere Modellerkennung (gfs_seamless läuft für 16 Tage, ECMWF für 15)
+    # FIX: GFS Ensemble liefert 16 Tage, ECMWF liefert 15.
     if "gfs" in model.lower(): days = 16
     elif "ecmwf" in model.lower(): days = 15
     else: days = 7
@@ -206,7 +206,6 @@ def fetch_ensemble_data(lat, lon, param, model):
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
     if "RUC" in model_name: step, delay = 1, 2.0
-    elif "AIFS" in model_name: step, delay = 12, 9.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
     else: step, delay = 3, 2.5
@@ -216,13 +215,19 @@ def get_available_runs(model_name):
     return {f"Lauf: { (latest - timedelta(hours=i*step)).strftime('%d.%m.%Y | %H:02d') }Z": (latest - timedelta(hours=i*step)) for i in range(6)}
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def download_and_extract(url, is_bz2=False):
+def download_and_extract(url, is_bz2=False, param_name=None):
     if not url: return None, None, None
     try:
         resp = requests.get(url, headers={"User-Agent": "Mozilla"}, timeout=15)
         if resp.status_code != 200: return None, None, None
         with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f: f.write(bz2.decompress(resp.content) if is_bz2 else resp.content); t_path = f.name
         ds = xr.open_dataset(t_path, engine='cfgrib')
+        
+        # INTELLIGENTE ENSEMBLE BEHANDLUNG (Für ICON-D2-EPS)
+        if 'number' in ds.dims:
+            if param_name == "Signifikantes Wetter": ds = ds.isel(number=0) # Kategorien darf man nicht durch den Durchschnitt runden!
+            else: ds = ds.mean(dim='number') # Für alles andere den Mittelwert berechnen!
+
         if ds['longitude'].max() > 180: ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180)).sortby('longitude')
         act_var = list(ds.data_vars)[0]
         vals, lats, lons = np.squeeze(ds[act_var].values), ds['latitude'].values, ds['longitude'].values
@@ -246,7 +251,7 @@ def get_topography(model):
 
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
-    if param_name == "CAPE & CIN (Deckel)": return None, None, None
+    if param_name in ["CAPE & CIN (Deckel)", "Scherung 0-1 km", "Scherung 0-6 km"]: return None, None, None
 
     if "GFS" in model:
         vm = {
@@ -256,12 +261,12 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         }
         fs = vm.get(param_name, "")
         if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
-        return download_and_extract(f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}&{fs}" if fs else None)
+        return download_and_extract(f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}&{fs}" if fs else None, param_name=param_name)
     
-    # FIX: Angepasste Variablennamen für die Windebenen & Hagel bei ICON-D2
+    # FIX: Exakte Variablen-Namen des DWD für Scherung & Hagel
     dm = {
-        "Temperatur (2m)": ("t_2m", "2d_t_2m", None), "Windböen 10m": ("vmax_10m", "2d_vmax_10m", None), 
-        "Akk. Niederschlag (mm)": ("tot_prec", "2d_tot_prec", None), "Niederschlagsrate (mm/h)": ("tot_prec", "2d_tot_prec", None), 
+        "Temperatur (2m)": ("t_2m", "t_2m", None), "Windböen 10m": ("vmax_10m", "vmax_10m", None), 
+        "Akk. Niederschlag (mm)": ("tot_prec", "tot_prec", None), "Niederschlagsrate (mm/h)": ("tot_prec", "tot_prec", None), 
         "500 hPa Geopot. Height": ("fi", "fi", "500"), "850 hPa Temp.": ("t", "t", "850"), 
         "MLCAPE": ("cape_ml", "cape_ml", None), "CIN": ("cin_ml", "cin_ml", None),
         "PMSL": ("pmsl", "pmsl", None), "Signifikantes Wetter": ("ww", "ww", None),
@@ -274,14 +279,38 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     if param_name not in dm: return None, None, None
     fld, var, lvl = dm[param_name]
     
-    if lvl: 
-        if "D2" in model: u = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{fld}/icon-d2_germany_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2"
-        else: u = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_{var.upper()}.grib2.bz2"
-    else: 
-        if "D2" in model: u = f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_str}/{fld}/icon-d2_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var}.grib2.bz2"
-        else: u = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_{var.replace('2d_', '').upper()}.grib2.bz2"
+    # INTELLIGENTER URL-SCANNER: Probiert alle möglichen DWD Namens-Variationen, um 404 Fehler zu verhindern
+    urls_to_try = []
+    if "D2" in model:
+        m_str = "icon-d2-eps" if "EPS" in model else ("icon-d2-ruc" if "RUC" in model else "icon-d2")
+        base = f"https://opendata.dwd.de/weather/nwp/{m_str}/grib/{run_str}/{fld}/"
+        if lvl:
+            prefix = f"{m_str}_germany_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_"
+            urls_to_try.extend([base + prefix + f"{var.upper()}.grib2.bz2", base + prefix + f"{var}.grib2.bz2"])
+        else:
+            prefix = f"{m_str}_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_"
+            urls_to_try.extend([
+                base + prefix + f"{var}.grib2.bz2",
+                base + prefix + f"2d_{var}.grib2.bz2",
+                base + prefix + f"{var.replace('2d_', '')}.grib2.bz2"
+            ])
+    elif "EU" in model:
+        base = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/"
+        if lvl:
+            prefix = f"icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_"
+            urls_to_try.append(base + prefix + f"{var.upper()}.grib2.bz2")
+        else:
+            prefix = f"icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_"
+            urls_to_try.extend([base + prefix + f"{var.upper()}.grib2.bz2", base + prefix + f"{var.replace('2d_', '').upper()}.grib2.bz2"])
+            
+    for u in urls_to_try:
+        try:
+            resp = requests.head(u, timeout=5)
+            if resp.status_code == 200:
+                return download_and_extract(u, is_bz2=True, param_name=param_name)
+        except: pass
         
-    return download_and_extract(u, is_bz2=True)
+    return None, None, None
 
 def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlays):
     pmsl_data, extra_overlay = None, None
@@ -294,7 +323,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         if cape_vals is None or cin_vals is None: return None, None, None, "", None, None
         return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
 
-    # FIX: Robustere Behandlung von Windscherung (verhindert Tuple-Index-Fehler)
     if param_name == "Scherung 0-1 km":
         res_u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m")
         res_v10 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 10m")
@@ -336,7 +364,8 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Akk. Niederschlag (mm)": title = "Niederschlag in mm"
     elif param_name == "Niederschlagsrate (mm/h)":
         if forecast_hour > 0:
-            _, _, v1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)")
+            res_v1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)")
+            v1 = res_v1[2]
             if isinstance(v1, tuple): v1 = v1[0]
             vals = np.clip(vals - v1, 0, None) if v1 is not None else vals
         else: vals = np.zeros_like(vals)
@@ -505,9 +534,10 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
+    # NEU: ICON-D2-EPS wurde in die Modellkarten eingefügt[span_5](start_span)[span_5](end_span)!
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
-        idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
-        st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
+        idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
+        st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
     if st.session_state.m_radio != st.session_state.model_choice:
         st.session_state.model_choice = st.session_state.m_radio
         st.rerun()
@@ -646,7 +676,7 @@ with tab_design:
 tab_map, tab_ens = st.tabs(["🗺️ Karten-Terminal", "📈 Ensemble (Spaghetti)"])
 
 with tab_map:
-    max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else (27 if "RUC" in model_choice else 48))
+    max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))
     step_h = 3 if "GFS" in model_choice else 1
     tz_berlin = ZoneInfo("Europe/Berlin")
     start_time_local = run_time.astimezone(tz_berlin)
@@ -667,7 +697,7 @@ with tab_map:
     cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
     if cache_key in st.session_state.map_cache:
-        st.image(st.session_state.map_cache[cache_key]["image"])
+        st.image(st.session_state.map_cache[cache_key]["image"], width="stretch")
         if st.session_state.map_cache[cache_key].get("extremes"):
             st.info(f"**Extremwerte (Ausschnitt Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
     else:
@@ -696,15 +726,16 @@ with tab_map:
 
 with tab_ens:
     st.markdown("### 📈 Profi-Ensemble Prognose (Punktabfrage)")
-    st.info("Hinweis: Da Ensemble-Berechnungen tausende Gigabyte erfordern, wird diese Ansicht direkt aus der API generiert.")
+    st.info("Hinweis: Da Ensemble-Berechnungen tausende Gigabyte erfordern, wird diese Ansicht ressourcenschonend direkt aus der Open-Meteo API generiert.")
     
     col_e1, col_e2, col_e3 = st.columns(3)
     
     with col_e1: ens_city = st.selectbox("Ort:", list(GERMAN_CITIES.keys()))
-    with col_e2: ens_model = st.selectbox("Modell-Ensemble:", ["ICON-EPS (DWD)", "GFS-Seamless (NOAA)", "ECMWF-EPS"])
+    with col_e2: ens_model = st.selectbox("Modell-Ensemble:", ["ICON-EPS (DWD)", "ICON-D2-EPS (DWD)", "GFS-ENS (NOAA)", "ECMWF-EPS"])
     with col_e3: ens_param = st.selectbox("Wetter-Parameter:", ["Temperatur (2m)", "850 hPa Temp.", "Niederschlag (mm/h)", "Windböen (km/h)", "CAPE (J/kg)"])
     
-    om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "GFS-Seamless (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
+    # NEU: Das fehlende ID2 Ensemble wurde in den ENS-Plot eingefügt
+    om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "ICON-D2-EPS (DWD)": "icon_d2_ensemble", "GFS-ENS (NOAA)": "gfs_ensemble", "ECMWF-EPS": "ecmwf_ensemble"}
     om_param_map = {"Temperatur (2m)": "temperature_2m", "850 hPa Temp.": "temperature_850hPa", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
     
     if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", width="stretch"):
