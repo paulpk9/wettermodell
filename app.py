@@ -42,11 +42,17 @@ if "map_cache" not in st.session_state: st.session_state.map_cache = {}
 if "f_hour" not in st.session_state: st.session_state.f_hour = 0
 if "config" not in st.session_state: st.session_state.config = {}
 
+# Initiale States für die neuen Dropdown-Popovers
+if "model_choice" not in st.session_state: st.session_state.model_choice = "ICON-D2 (2.2km)"
+if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
+if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
+
 # --- DESIGN & KATEGORIEN DEFAULTS ---
 DEFAULT_DESIGN = {
     "bg_color": "#0E1117", "title_bg": "#0E1117", "text_color": "#FFFFFF", 
     "border_color": "#FFFFFF", "border_alpha": 0.4, "font_family": "sans-serif",
-    "cbar_step": 1, "number_color": "#000000", "number_outline": "#FFFFFF", "number_size": 9
+    "cbar_step": 1, "number_color": "#000000", "number_outline": "#FFFFFF",
+    "title_size": 11, "cbar_size": 11, "line_width": 0.8
 }
 if "design" not in st.session_state: st.session_state.design = DEFAULT_DESIGN.copy()
 
@@ -180,12 +186,13 @@ def get_topography(model):
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
     
-    # Sonderregel für Kombi-Parameter: Der wird in `load_parameter_data` abgefangen
+    # Sonderregel für Kombi-Parameter
     if param_name == "CAPE & CIN (Deckel)": return None, None, None
 
     if "GFS" in model:
         vm = {
             "Temperatur (2m)": "var_TMP=on&lev_2_m_above_ground=on", "Akk. Niederschlag (mm)": "var_APCP=on&lev_surface=on", 
+            "Windböen 10m": "var_GUST=on&lev_surface=on", "Niederschlagsrate (mm/h)": "var_PRATE=on&lev_surface=on",
             "MLCAPE": "var_CAPE=on&lev_surface=on", "CIN": "var_CIN=on&lev_surface=on", "PMSL": "var_PRMSL=on&lev_mean_sea_level=on"
         }
         fs = vm.get(param_name, "")
@@ -215,7 +222,6 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
 def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlays):
     pmsl_data, extra_overlay = None, None
     
-    # Sonderlogik für den "Deckel" (CAPE + CIN)
     if param_name == "CAPE & CIN (Deckel)":
         lons, lats, cape_vals = get_raw_grib(run_time, forecast_hour, model_type, "MLCAPE")
         _, _, cin_vals = get_raw_grib(run_time, forecast_hour, model_type, "CIN")
@@ -225,7 +231,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         
         return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
 
-    # Normale Logik für alle anderen
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
     if isinstance(vals, tuple): vals, p_raw = vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
     if vals is None: return None, None, None, "", None, None
@@ -291,7 +296,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
     karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both' if not is_categorical else 'neither', alpha=0.95)
     
-    # Farbskala mit einstellbaren Zahlenschritten (cbar_step)
     if is_categorical:
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
         cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
@@ -300,31 +304,26 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         visible_ticks = levels[::tick_step]
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=visible_ticks, aspect=40)
     
-    cbar.set_label(legend_title, color=design['text_color'], size=11, fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'))
+    cbar.set_label(legend_title, color=design['text_color'], size=int(design.get('cbar_size', 11)), fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'))
     cbar.ax.xaxis.set_tick_params(color=design['text_color'], labelcolor=design['text_color'], labelsize=9)
     for label in cbar.ax.get_xticklabels(): label.set_fontfamily(design.get('font_family', 'sans-serif'))
     
-    # Grenzen
-    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=0.8, alpha=float(design.get('border_alpha', 0.4)))
-    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=1.2, alpha=float(design.get('border_alpha', 0.4)))
+    line_w = float(design.get('line_width', 0.8))
+    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w, alpha=float(design.get('border_alpha', 0.4)))
+    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w + 0.4, alpha=float(design.get('border_alpha', 0.4)))
 
-    # Extra Overlay: Deckel (CIN)
     if overlays.get('extra_data') is not None and "CIN" in legend_title:
-        # Erstellt eine gut sichtbare leuchtend blaue Schraffur dort, wo der CIN Wert (Deckel) über 50 liegt
         ax.contourf(lons, lats, overlays['extra_data'], levels=[50, 100000], hatches=['//'], colors='none', edgecolors='#00BFFF', alpha=0.6)
 
-    # Isobaren
     if overlays.get('pmsl_data') is not None:
         iso = ax.contour(lons, lats, overlays['pmsl_data'], levels=np.arange(900, 1100, 5), colors=design['text_color'], linewidths=1.0, alpha=0.6)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors=design['text_color'])
 
-    # Topographie / Höhenlinien (250m)
     if overlays.get('topo'):
         t_lons, t_lats, t_data = get_topography(model_type)
         if t_data is not None:
             topo = ax.contour(t_lons, t_lats, t_data, levels=np.arange(250, 4000, 250), colors=design['text_color'], alpha=0.25, linewidths=0.6)
 
-    # Wichtige Städte
     if overlays.get('cities') and region == "Deutschland":
         c_lons = [coords[0] for coords in GERMAN_CITIES.values()]
         c_lats = [coords[1] for coords in GERMAN_CITIES.values()]
@@ -335,15 +334,15 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])])
 
-    # OVERLAY: Zahlenwerte (Verdoppelter Abstand)
-    if overlays.get('numbers') and legend_title == "Temperatur in °C":
+    # OVERLAY: Zahlenwerte (Mit größerem Abstand & Schriftgröße 5 fix)
+    if overlays.get('numbers') and not is_categorical:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         
         try: dy_km = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
         except: dy_km = 2.2
         if dy_km < 0.1: dy_km = 2.2
         
-        target_km = 40.0 # <-- Hier der doppelte Platz (vorher 20)
+        target_km = 60.0 # <-- Hier der großzügige Abstand (verhindert Überlappungen absolut)
         step = max(1, int(target_km / dy_km)) 
         
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
@@ -353,18 +352,20 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         valid_mask = mask & grid_mask
         
         for lon_val, lat_val, val in zip(lons[valid_mask], lats[valid_mask], data[valid_mask]):
-            txt = f"{val:.0f}"
-            ax.text(lon_val, lat_val, txt, fontsize=int(design.get('number_size', 9)), 
-                    fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
+            if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
+            if "CAPE" in legend_title and val < 50: continue
+            txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
+            
+            # Feste Schriftgröße 5, wie gewünscht
+            ax.text(lon_val, lat_val, txt, fontsize=5, fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
                     color=design.get('number_color', '#000000'), ha='center', va='center', 
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))])
 
     ax.axis('off')
     
-    # Modernes Header-Label
     bbox_props = dict(boxstyle="round,pad=0.4", fc=design.get('title_bg', '#0E1117'), ec=design['border_color'], lw=0.5, alpha=0.85)
     ax.text(0.015, 0.985, f"{model_type} | {map_title_time}", transform=ax.transAxes, 
-            color=design['text_color'], fontsize=11, fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'), 
+            color=design['text_color'], fontsize=int(design.get('title_size', 11)), fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'), 
             ha='left', va='top', bbox=bbox_props)
     
     buf = io.BytesIO()
@@ -377,23 +378,30 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # GFS ist wieder drin!
-    model_choice = st.selectbox("Modell:", ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"])
+    # Popover-Dropdowns für saubere Handyanzeige
+    with st.popover(f"🌍 Modell: {st.session_state.model_choice}", use_container_width=True):
+        st.session_state.model_choice = st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"], label_visibility="collapsed")
+    model_choice = st.session_state.model_choice
+
     available_runs = get_available_runs(model_choice)
     run_label = st.selectbox("Modelllauf:", list(available_runs.keys()))
     run_time = available_runs[run_label]
     
-    # Neue CIN Parameter
     param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Signifikantes Wetter"]
-    param_choice = st.selectbox("Parameter:", param_list)
+    with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", use_container_width=True):
+        st.session_state.param_choice = st.radio("Parameter", param_list, label_visibility="collapsed")
+    param_choice = st.session_state.param_choice
     
-    # Lädt die Konfiguration immer strikt aus dem GitHub Ordner
     if param_choice not in st.session_state.config: 
         st.session_state.config[param_choice] = load_param_config(param_choice)
         
     region_options = list(REGIONS.keys())
     if "D2" in model_choice: region_options.remove("Europa") 
-    region_choice = st.selectbox("Region:", region_options, index=region_options.index("Deutschland") if "Deutschland" in region_options else 0)
+    if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
+    
+    with st.popover(f"📍 Region: {st.session_state.region_choice}", use_container_width=True):
+        st.session_state.region_choice = st.radio("Region", region_options, label_visibility="collapsed")
+    region_choice = st.session_state.region_choice
 
 with tab_overlays:
     st.info("Kombiniere mehrere Karten-Layer:")
@@ -402,7 +410,7 @@ with tab_overlays:
     show_pmsl = st.toggle("💨 Isobaren (Luftdruck)", value=True) if param_choice == "850 hPa Temp." else False
     
     show_numbers = False
-    if param_choice == "Temperatur (2m)":
+    if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_numbers = st.toggle("🔢 Raster-Zahlenwerte auf Karte", value=False)
 
 with tab_design:
@@ -430,17 +438,19 @@ with tab_design:
         st.session_state.design['bg_color'] = st.color_picker("Hintergrund", value=st.session_state.design['bg_color'])
         st.session_state.design['title_bg'] = st.color_picker("Header-Box", value=st.session_state.design.get('title_bg', '#0E1117'))
         st.session_state.design['text_color'] = st.color_picker("Text & Linien", value=st.session_state.design['text_color'])
-    with col_d2:
         st.session_state.design['border_color'] = st.color_picker("Grenzen-Farbe", value=st.session_state.design['border_color'])
+    with col_d2:
         st.session_state.design['border_alpha'] = st.slider("Grenzen-Deckkraft", 0.0, 1.0, float(st.session_state.design.get('border_alpha', 0.4)), 0.1)
+        st.session_state.design['line_width'] = st.slider("Linien-Dicke", 0.1, 3.0, float(st.session_state.design.get('line_width', 0.8)), 0.1)
+        st.session_state.design['title_size'] = st.number_input("Header Schriftgröße", 5, 20, int(st.session_state.design.get('title_size', 11)))
+        st.session_state.design['cbar_size'] = st.number_input("Skala Schriftgröße", 5, 20, int(st.session_state.design.get('cbar_size', 11)))
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
     st.divider()
-    st.subheader("🔢 Zahlen-Design (Temperatur)")
-    c_z1, c_z2, c_z3 = st.columns(3)
+    st.subheader("🔢 Zahlen-Design")
+    c_z1, c_z2 = st.columns(2)
     with c_z1: st.session_state.design['number_color'] = st.color_picker("Zahlfarbe", value=st.session_state.design.get('number_color', '#000000'))
     with c_z2: st.session_state.design['number_outline'] = st.color_picker("Umrandung", value=st.session_state.design.get('number_outline', '#FFFFFF'))
-    with c_z3: st.session_state.design['number_size'] = st.number_input("Größe", 5, 20, int(st.session_state.design.get('number_size', 9)))
 
     st.divider()
     st.subheader(f"📊 Skala anpassen")
