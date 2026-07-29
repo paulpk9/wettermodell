@@ -50,5 +50,37 @@
     {
         "value": 120.0,
         "color": "#8f008c"
+    },
+    {
+        "value": 130.0,
+        "color": "#ca45e0"
+    },
+    {
+        "value": 140.0,
+        "color": "#ef8bff"
+    },
+    {
+        "value": 150.0,
+        "color": "#fbc8ff"
+    },
+    {
+        "value": 160.0,
+        "color": "#ffffff"
+    },
+    {
+        "value": 170.0,
+        "color": "#a7a7a7"
+    },
+    {
+        "value": 180.0,
+        "color": "#606060"
+    },
+    {
+        "value": 190.0,
+        "color": "#404040"
+    },
+    {
+        "value": 200.0,
+        "color": "#2a2a2a"
     }
 ]
