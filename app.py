@@ -11,6 +11,7 @@ import bz2
 import tempfile
 import os
 import uuid
+from PIL import Image
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import xarray as xr
@@ -38,23 +39,50 @@ st.markdown("""
 
 st.title("🗺️ Statische Modellkarte (Profi-Terminal)")
 
-# --- SYSTEM STATES ---
-if "map_cache" not in st.session_state: st.session_state.map_cache = {}
-if "f_hour" not in st.session_state: st.session_state.f_hour = 0
-if "config" not in st.session_state: st.session_state.config = {}
+# --- GITHUB CLIENT ---
+def get_github_client(): return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
 
-if "model_choice" not in st.session_state: st.session_state.model_choice = "ICON-D2 (2.2km)"
-if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
-if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
-
-# --- DESIGN & KATEGORIEN DEFAULTS ---
+# --- DESIGN DEFAULTS & SPEICHER-LOGIK ---
 DEFAULT_DESIGN = {
     "bg_color": "#0E1117", "title_bg": "#0E1117", "text_color": "#FFFFFF", 
     "border_color": "#FFFFFF", "border_alpha": 0.4, "font_family": "sans-serif",
     "cbar_step": 1, "number_color": "#000000", "number_outline": "#FFFFFF",
-    "title_size": 11, "cbar_size": 11, "line_width": 0.8
+    "title_size": 11, "cbar_size": 11, "line_width": 0.8, "watermark": "", "discrete_colors": False
 }
-if "design" not in st.session_state: st.session_state.design = DEFAULT_DESIGN.copy()
+
+def load_design_config():
+    g = get_github_client()
+    if g and "GITHUB_REPO" in st.secrets:
+        try:
+            repo = g.get_repo(st.secrets["GITHUB_REPO"])
+            data = json.loads(repo.get_contents("configs/design_config.json").decoded_content.decode())
+            return {**DEFAULT_DESIGN, **data} # Fügt neue Defaults hinzu, falls sie in der alten JSON fehlen
+        except: pass
+    return DEFAULT_DESIGN.copy()
+
+def save_design_config(design_dict):
+    g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
+    if g and repo_name:
+        try:
+            repo = g.get_repo(repo_name)
+            filepath = "configs/design_config.json"
+            try: 
+                file = repo.get_contents(filepath)
+                repo.update_file(filepath, "Update Design-Config", json.dumps(design_dict, indent=4), file.sha)
+            except: 
+                repo.create_file(filepath, "Create Design-Config", json.dumps(design_dict, indent=4))
+            st.success("Design & Wasserzeichen erfolgreich auf GitHub gespeichert!")
+        except Exception as e: st.error(f"Fehler beim Speichern: {e}")
+
+# --- SYSTEM STATES ---
+if "map_cache" not in st.session_state: st.session_state.map_cache = {}
+if "f_hour" not in st.session_state: st.session_state.f_hour = 0
+if "config" not in st.session_state: st.session_state.config = {}
+if "design" not in st.session_state: st.session_state.design = load_design_config()
+
+if "model_choice" not in st.session_state: st.session_state.model_choice = "ICON-D2 (2.2km)"
+if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
+if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
 
 SIG_WETTER_LABELS = {
     1: "Regen (leicht)", 2: "Regen (mäßig)", 3: "Regen (stark)",
@@ -97,9 +125,6 @@ GERMAN_CITIES = {
     "Hannover": (9.73, 52.37), "Nürnberg": (11.07, 49.45)
 }
 
-# --- GITHUB, CONFIGS & DOWNLOAD LOGIK ---
-def get_github_client(): return Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"])) if "GITHUB_TOKEN" in st.secrets else None
-
 def get_config_filepath(param_name):
     safe_name = param_name.replace(" ", "_").replace("/", "_").replace(".", "")
     return f"configs/config_{safe_name}.json"
@@ -111,7 +136,7 @@ def get_saved_config_files():
         try:
             repo = g.get_repo(st.secrets["GITHUB_REPO"])
             contents = repo.get_contents("configs")
-            return [c.name for c in contents if c.name.endswith(".json")]
+            return [c.name for c in contents if c.name.endswith(".json") and not c.name.endswith("design_config.json")]
         except: pass
     return []
 
@@ -148,9 +173,19 @@ def load_borders():
         f1.write(w_r); f1_name = f1.name; f2.write(bl_r); f2_name = f2.name
     return gpd.read_file(f1_name), gpd.read_file(f2_name)
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_satellite_bg(lon_min, lon_max, lat_min, lat_max):
+    # Holt ein echtes S2-Satellitenbild von EOX als Hintergrundbild
+    url = f"https://s2maps-tiles.eu/wms/?service=WMS&request=GetMap&version=1.1.1&layers=s2cloudless-2020_3857&styles=&format=image/jpeg&transparent=false&width=1000&height=1000&srs=EPSG:4326&bbox={lon_min},{lat_min},{lon_max},{lat_max}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            return np.array(Image.open(io.BytesIO(resp.content)))
+    except: pass
+    return None
+
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    # RUC Delay auf 2.5 Stunden erhöht, um DWD-Serververzögerungen und 404-Fehler zu vermeiden
     if "RUC" in model_name: step, delay = 1, 2.5
     elif "AIFS" in model_name: step, delay = 12, 9.5
     elif "GFS" in model_name: step, delay = 6, 5.5
@@ -192,7 +227,6 @@ def get_topography(model):
 
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
-    
     if param_name == "CAPE & CIN (Deckel)": return None, None, None
 
     if "GFS" in model:
@@ -234,7 +268,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         
         if isinstance(cape_vals, tuple): cape_vals, p_raw = cape_vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
         if cape_vals is None or cin_vals is None: return None, None, None, "", None, None
-        
         return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
@@ -285,10 +318,19 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     if max_v == min_v: max_v += 1 
     
     is_categorical = (legend_title == "Signifikantes Wetter")
+    is_discrete = design.get('discrete_colors', False)
+    
+    # NEU: Maskiere Niederschlag < 0.1, damit das Satellitenbild sichtbar wird
+    if overlays.get('satellite') and ("Niederschlag" in legend_title or "Regen" in legend_title):
+        data = np.where(data < 0.1, np.nan, data)
     
     if is_categorical:
         cmap = mcolors.ListedColormap(colors)
         bounds = [v - 0.5 for v in levels] + [levels[-1] + 0.5]
+        norm = mcolors.BoundaryNorm(bounds, cmap.N)
+    elif is_discrete:
+        cmap = mcolors.ListedColormap(colors)
+        bounds = levels + [max_v + 1.0]
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
     else:
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", list(zip([(v - min_v) / (max_v - min_v) for v in levels], colors)))
@@ -302,13 +344,19 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
-    if is_categorical:
-        # Pcolormesh ist zwingend nötig für kategoriale Daten (verhindert Interpolationsfehler & unsichtbare Flächen)
-        karte = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, alpha=0.95, shading='auto')
+    # NEU: Echtes Satellitenbild als Hintergrund (Falls aktiv & Maske frei)
+    if overlays.get('satellite') and region == "Deutschland" and ("Niederschlag" in legend_title or "Regen" in legend_title):
+        sat_img = get_satellite_bg(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
+        if sat_img is not None:
+            ax.imshow(sat_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=0)
+        
+    if is_categorical or is_discrete:
+        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='max' if not is_categorical else 'neither', alpha=0.9 if overlays.get('satellite') else 0.95, zorder=1)
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
-        cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
+        if is_categorical:
+            cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
     else:
-        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both', alpha=0.95)
+        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both', alpha=0.9 if overlays.get('satellite') else 0.95, zorder=1)
         tick_step = int(design.get('cbar_step', 1))
         visible_ticks = levels[::tick_step]
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=visible_ticks, aspect=40)
@@ -318,48 +366,43 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     for label in cbar.ax.get_xticklabels(): label.set_fontfamily(design.get('font_family', 'sans-serif'))
     
     line_w = float(design.get('line_width', 0.8))
-    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w, alpha=float(design.get('border_alpha', 0.4)))
-    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w + 0.4, alpha=float(design.get('border_alpha', 0.4)))
+    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w, alpha=float(design.get('border_alpha', 0.4)), zorder=2)
+    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w + 0.4, alpha=float(design.get('border_alpha', 0.4)), zorder=2)
 
     if overlays.get('extra_data') is not None and "CIN" in legend_title:
-        ax.contourf(lons, lats, overlays['extra_data'], levels=[50, 100000], hatches=['//'], colors='none', edgecolors='#00BFFF', alpha=0.6)
+        ax.contourf(lons, lats, overlays['extra_data'], levels=[50, 100000], hatches=['//'], colors='none', edgecolors='#00BFFF', alpha=0.6, zorder=3)
 
     if overlays.get('pmsl_data') is not None:
-        iso = ax.contour(lons, lats, overlays['pmsl_data'], levels=np.arange(900, 1100, 5), colors=design['text_color'], linewidths=1.0, alpha=0.6)
+        iso = ax.contour(lons, lats, overlays['pmsl_data'], levels=np.arange(900, 1100, 5), colors=design['text_color'], linewidths=1.0, alpha=0.6, zorder=3)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors=design['text_color'])
 
     if overlays.get('topo'):
         t_lons, t_lats, t_data = get_topography(model_type)
         if t_data is not None:
-            topo = ax.contour(t_lons, t_lats, t_data, levels=np.arange(250, 4000, 250), colors=design['text_color'], alpha=0.25, linewidths=0.6)
+            topo = ax.contour(t_lons, t_lats, t_data, levels=np.arange(250, 4000, 250), colors=design['text_color'], alpha=0.25, linewidths=0.6, zorder=1)
 
     if overlays.get('cities') and region == "Deutschland":
         c_lons = [coords[0] for coords in GERMAN_CITIES.values()]
         c_lats = [coords[1] for coords in GERMAN_CITIES.values()]
         c_names = list(GERMAN_CITIES.keys())
-        ax.plot(c_lons, c_lats, 'o', color=design['text_color'], markersize=3, alpha=0.8)
+        ax.plot(c_lons, c_lats, 'o', color=design['text_color'], markersize=3, alpha=0.8, zorder=4)
         for lon_c, lat_c, name in zip(c_lons, c_lats, c_names):
             ax.text(lon_c + 0.08, lat_c + 0.08, name, color=design['text_color'], fontsize=8, fontweight='bold',
                     fontfamily=design.get('font_family', 'sans-serif'),
-                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])])
+                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])], zorder=4)
 
-    # OVERLAY: Zahlenwerte (Peaks für Niederschlag/Regen, Raster für den Rest)
     if overlays.get('numbers') and not is_categorical:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
-        
         try: dy_km = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
         except: dy_km = 2.2
         if dy_km < 0.1: dy_km = 2.2
-        
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
         
         if legend_title == "Regenrate in mm/h" or legend_title == "Niederschlag in mm":
-            # Peak Finding: Sucht die isolierten Kerne von Niederschlagszellen (Abstand ca. 40km)
             size_px = max(3, int(40.0 / dy_km))
             local_max = ndimage.maximum_filter(data, size=size_px) == data
             valid_mask = mask & local_max & (data >= 0.1)
         else:
-            # Raster System: Für Temperatur, Böen (Fester, großer 60km Abstand)
             target_km = 60.0 
             step = max(1, int(target_km / dy_km)) 
             grid_mask = np.zeros_like(mask, dtype=bool)
@@ -370,18 +413,26 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
             if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
             if "CAPE" in legend_title and val < 50: continue
             txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
-            
-            # Feste Schriftgröße 5
             ax.text(lon_val, lat_val, txt, fontsize=5, fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
                     color=design.get('number_color', '#000000'), ha='center', va='center', 
-                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))])
+                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))], zorder=5)
+
+    # NEU: Eigenes Wasserzeichen
+    if design.get('watermark'):
+        ax.text(0.5, 0.02, design['watermark'], transform=ax.transAxes, color=design['text_color'], 
+                fontsize=10, fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'),
+                ha='center', va='bottom', alpha=0.5, zorder=10)
 
     ax.axis('off')
     
-    bbox_props = dict(boxstyle="round,pad=0.4", fc=design.get('title_bg', '#0E1117'), ec=design['border_color'], lw=0.5, alpha=0.85)
+    # NEU: Glassmorphism beim Header
+    bg_rgba = mcolors.to_rgba(design.get('title_bg', '#0E1117'), alpha=0.4)
+    ec_rgba = mcolors.to_rgba(design['border_color'], alpha=0.6)
+    bbox_props = dict(boxstyle="round,pad=0.5", fc=bg_rgba, ec=ec_rgba, lw=1.2)
+    
     ax.text(0.015, 0.985, f"{model_type} | {map_title_time}", transform=ax.transAxes, 
             color=design['text_color'], fontsize=int(design.get('title_size', 11)), fontweight='bold', fontfamily=design.get('font_family', 'sans-serif'), 
-            ha='left', va='top', bbox=bbox_props)
+            ha='left', va='top', bbox=bbox_props, zorder=10)
     
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0.1, facecolor=design['bg_color'])
@@ -393,7 +444,6 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # Popover-Dropdown: Modell (Inklusive D2-RUC)
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}"):
         idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
         st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
@@ -407,7 +457,6 @@ with tab_main:
     run_label = st.selectbox("Modelllauf:", list(available_runs.keys()))
     run_time = available_runs[run_label]
     
-    # Popover-Dropdown: Parameter
     param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Signifikantes Wetter"]
     with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}"):
         idx_p = param_list.index(st.session_state.param_choice) if st.session_state.param_choice in param_list else 0
@@ -421,7 +470,6 @@ with tab_main:
     if param_choice not in st.session_state.config: 
         st.session_state.config[param_choice] = load_param_config(param_choice)
         
-    # Popover-Dropdown: Region
     region_options = list(REGIONS.keys())
     if "D2" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
@@ -444,27 +492,26 @@ with tab_overlays:
     show_numbers = False
     if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
+        
+    # NEU: Satellitenbild-Schalter (nur Deutschland & Niederschlag)
+    show_satellite = False
+    if region_choice == "Deutschland" and param_choice in ["Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
+        show_satellite = st.toggle("🛰️ Satellitenbild-Hintergrund", value=False)
 
 with tab_design:
-    st.subheader("📥 Gespeicherte Skala laden")
-    cloud_files = get_saved_config_files()
-    if cloud_files:
-        selected_file = st.selectbox("Cloud-Dateien:", ["-- Wählen --"] + cloud_files, label_visibility="collapsed")
-        if selected_file != "-- Wählen --":
-            if st.button("Laden & Anwenden"):
-                try:
-                    g = get_github_client()
-                    repo = g.get_repo(st.secrets["GITHUB_REPO"])
-                    loaded_data = json.loads(repo.get_contents(f"configs/{selected_file}").decoded_content.decode())
-                    st.session_state.config[param_choice] = loaded_data
-                    st.success(f"{selected_file} erfolgreich geladen!")
-                    st.rerun()
-                except Exception as e: st.error(f"Fehler: {e}")
-    else:
-        st.write("Keine gespeicherten Skalen auf GitHub gefunden.")
+    # NEU: Theme Selektor
+    st.subheader("🖥️ Basis-Themes")
+    theme_choice = st.selectbox("Farbschema wählen:", ["Benutzerdefiniert / Gespeichert", "OLED Dark", "Light / Papier", "Satellite / Retro"])
+    if theme_choice != st.session_state.get('last_theme', 'Benutzerdefiniert / Gespeichert'):
+        if theme_choice == "OLED Dark": st.session_state.design.update({"bg_color": "#000000", "title_bg": "#000000", "text_color": "#FFFFFF", "border_color": "#FFFFFF", "border_alpha": 0.2})
+        elif theme_choice == "Light / Papier": st.session_state.design.update({"bg_color": "#FFFFFF", "title_bg": "#FFFFFF", "text_color": "#000000", "border_color": "#000000", "border_alpha": 0.3, "number_color": "#000000", "number_outline": "#FFFFFF"})
+        elif theme_choice == "Satellite / Retro": st.session_state.design.update({"bg_color": "#1A2421", "title_bg": "#1A2421", "text_color": "#00FFCC", "border_color": "#00FFCC", "border_alpha": 0.5})
+        elif theme_choice == "Benutzerdefiniert / Gespeichert": st.session_state.design = load_design_config()
+        st.session_state['last_theme'] = theme_choice
+        st.rerun()
 
     st.divider()
-    st.subheader("🎨 Grafik-Design")
+    st.subheader("🎨 Karte & Text")
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         st.session_state.design['bg_color'] = st.color_picker("Hintergrund", value=st.session_state.design['bg_color'])
@@ -475,9 +522,14 @@ with tab_design:
         st.session_state.design['border_alpha'] = st.slider("Grenzen-Deckkraft", 0.0, 1.0, float(st.session_state.design.get('border_alpha', 0.4)), 0.1)
         st.session_state.design['line_width'] = st.slider("Linien-Dicke", 0.1, 3.0, float(st.session_state.design.get('line_width', 0.8)), 0.1)
         st.session_state.design['title_size'] = st.number_input("Header Schriftgröße", 5, 20, int(st.session_state.design.get('title_size', 11)))
-        st.session_state.design['cbar_size'] = st.number_input("Skala Schriftgröße", 5, 20, int(st.session_state.design.get('cbar_size', 11)))
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
+    # NEU: Wasserzeichen
+    st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
+    
+    if st.button("💾 Design & Wasserzeichen Speichern"):
+        save_design_config(st.session_state.design)
+
     st.divider()
     st.subheader("🔢 Zahlen-Design")
     c_z1, c_z2 = st.columns(2)
@@ -485,8 +537,13 @@ with tab_design:
     with c_z2: st.session_state.design['number_outline'] = st.color_picker("Umrandung", value=st.session_state.design.get('number_outline', '#FFFFFF'))
 
     st.divider()
-    st.subheader(f"📊 Skala anpassen")
-    st.session_state.design['cbar_step'] = st.number_input("Zeige nur jeden X-ten Wert als Zahl:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
+    st.subheader(f"📊 Skala: {param_choice}")
+    c_sk1, c_sk2 = st.columns(2)
+    with c_sk1:
+        st.session_state.design['discrete_colors'] = st.toggle("Harte Farbkanten (Diskret)", value=st.session_state.design.get('discrete_colors', False))
+    with c_sk2:
+        st.session_state.design['cbar_step'] = st.number_input("Zeige jeden X-ten Wert:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
+    st.session_state.design['cbar_size'] = st.number_input("Skala Schriftgröße", 5, 20, int(st.session_state.design.get('cbar_size', 11)))
     
     for item in st.session_state.config[param_choice]:
         if "_id" not in item: item["_id"] = str(uuid.uuid4())
@@ -498,7 +555,6 @@ with tab_design:
         
         if param_choice == "Signifikantes Wetter":
             with c1: 
-                # Das Dropdown für die Kategorien-Auswahl beim Signifikanten Wetter!
                 val = st.selectbox("W", options=list(SIG_WETTER_LABELS.keys()), 
                                    index=list(SIG_WETTER_LABELS.keys()).index(int(item['value'])) if int(item['value']) in SIG_WETTER_LABELS else 0,
                                    format_func=lambda x: SIG_WETTER_LABELS.get(x, str(x)),
@@ -521,7 +577,23 @@ with tab_design:
             st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())})
             st.rerun()
     with col_btn2:
-        if st.button("💾 Speichern"): save_param_config(param_choice, st.session_state.config[param_choice])
+        if st.button("💾 Skala Speichern"): save_param_config(param_choice, st.session_state.config[param_choice])
+        
+    st.divider()
+    st.subheader("📥 Gespeicherte Skala laden")
+    cloud_files = get_saved_config_files()
+    if cloud_files:
+        selected_file = st.selectbox("Cloud-Dateien:", ["-- Wählen --"] + cloud_files, label_visibility="collapsed")
+        if selected_file != "-- Wählen --":
+            if st.button("Laden & Anwenden"):
+                try:
+                    g = get_github_client()
+                    repo = g.get_repo(st.secrets["GITHUB_REPO"])
+                    loaded_data = json.loads(repo.get_contents(f"configs/{selected_file}").decoded_content.decode())
+                    st.session_state.config[param_choice] = loaded_data
+                    st.success(f"{selected_file} erfolgreich geladen!")
+                    st.rerun()
+                except Exception as e: st.error(f"Fehler: {e}")
 
 # --- HAUPTBEREICH & SCHIEBEREGLER ---
 max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else (27 if "RUC" in model_choice else 48))
@@ -541,7 +613,7 @@ selected_datetime = st.slider("Zeitpunkt", min_value=start_time_local, max_value
 chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
 st.session_state.f_hour = chosen_f_hour
 
-config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers))
+config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers) + str(show_satellite))
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
 if cache_key in st.session_state.map_cache:
@@ -549,7 +621,7 @@ if cache_key in st.session_state.map_cache:
 else:
     if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary"):
         with st.spinner("Lade GRIB-Daten und rendere Karte..."):
-            overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo}
+            overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo, "satellite": show_satellite}
             lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, overlays_dict)
             
             if lons is not None:
@@ -559,4 +631,4 @@ else:
                 st.session_state.map_cache[cache_key] = img_bytes
                 st.rerun() 
             else:
-                st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar[span_0](start_span)[span_0](end_span).")
+                st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar.")
