@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import xarray as xr
+import scipy.ndimage as ndimage
 import io
 
 # --- SEITEN-LAYOUT & CSS ---
@@ -130,9 +131,7 @@ def save_param_config(param_name, config_list):
     g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
     if g and repo_name:
         try:
-            # Erstelle eine reine Kopie für Github ohne die UI-UUIDs!
             clean_list = [{"value": float(c["value"]), "color": c["color"]} for c in config_list]
-            
             repo = g.get_repo(repo_name)
             filepath = get_config_filepath(param_name)
             try: 
@@ -153,7 +152,12 @@ def load_borders():
 
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
-    step, delay = (12, 9.5) if "AIFS" in model_name else ((6, 5.0) if "GFS" in model_name else ((6, 3.0) if "EU" in model_name else (3, 2.0)))
+    if "RUC" in model_name: step, delay = 1, 1.5
+    elif "AIFS" in model_name: step, delay = 12, 9.5
+    elif "GFS" in model_name: step, delay = 6, 5.0
+    elif "EU" in model_name: step, delay = 6, 3.0
+    else: step, delay = 3, 2.0
+    
     eff_now = now - timedelta(hours=delay)
     latest = eff_now.replace(hour=(eff_now.hour // step) * step, minute=0, second=0, microsecond=0)
     return {f"Lauf: { (latest - timedelta(hours=i*step)).strftime('%d.%m.%Y | %H:02d') }Z": (latest - timedelta(hours=i*step)) for i in range(6)}
@@ -284,7 +288,8 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     
     if is_categorical:
         cmap = mcolors.ListedColormap(colors)
-        contour_levels = np.arange(0.5, len(levels) + 1.5, 1.0)
+        bounds = [v - 0.5 for v in levels] + [levels[-1] + 0.5]
+        norm = mcolors.BoundaryNorm(bounds, cmap.N)
     else:
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", list(zip([(v - min_v) / (max_v - min_v) for v in levels], colors)))
         contour_levels = np.linspace(min_v, max_v, 150)
@@ -297,12 +302,12 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
-    karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both' if not is_categorical else 'neither', alpha=0.95)
-    
     if is_categorical:
+        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='neither', alpha=0.95)
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
         cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
     else:
+        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='both', alpha=0.95)
         tick_step = int(design.get('cbar_step', 1))
         visible_ticks = levels[::tick_step]
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=visible_ticks, aspect=40)
@@ -337,7 +342,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])])
 
-    # OVERLAY: Zahlenwerte (Riesiger Abstand, fix Schriftgröße 5)
+    # OVERLAY: Zahlenwerte (Peaks für Regenrate, Raster für den Rest)
     if overlays.get('numbers') and not is_categorical:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         
@@ -345,15 +350,20 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         except: dy_km = 2.2
         if dy_km < 0.1: dy_km = 2.2
         
-        # 60 km Abstand für die Zahlen, das lässt definitiv genug Freiraum!
-        target_km = 60.0 
-        step = max(1, int(target_km / dy_km)) 
-        
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
-        grid_mask = np.zeros_like(mask, dtype=bool)
-        grid_mask[::step, ::step] = True
         
-        valid_mask = mask & grid_mask
+        if legend_title == "Regenrate in mm/h":
+            # Peak Finding: Sucht die isolierten Kerne von Niederschlagszellen (Abstand ca. 40km)
+            size_px = max(3, int(40.0 / dy_km))
+            local_max = ndimage.maximum_filter(data, size=size_px) == data
+            valid_mask = mask & local_max & (data >= 0.1)
+        else:
+            # Raster System: Für Temperatur, Böen, Akk. NS (Fester, großer 60km Abstand)
+            target_km = 60.0 
+            step = max(1, int(target_km / dy_km)) 
+            grid_mask = np.zeros_like(mask, dtype=bool)
+            grid_mask[::step, ::step] = True
+            valid_mask = mask & grid_mask
         
         for lon_val, lat_val, val in zip(lons[valid_mask], lats[valid_mask], data[valid_mask]):
             if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
@@ -382,10 +392,10 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # Popover-Dropdown: Modell
+    # Popover-Dropdown: Modell (Inklusive D2-RUC)
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}", use_container_width=True):
-        idx_m = ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
-        st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
+        idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
+        st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
     if st.session_state.m_radio != st.session_state.model_choice:
         st.session_state.model_choice = st.session_state.m_radio
         st.rerun()
@@ -407,7 +417,6 @@ with tab_main:
         
     param_choice = st.session_state.param_choice
     
-    # Lädt die Konfiguration immer strikt aus dem GitHub Ordner
     if param_choice not in st.session_state.config: 
         st.session_state.config[param_choice] = load_param_config(param_choice)
         
@@ -433,7 +442,7 @@ with tab_overlays:
     
     show_numbers = False
     if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
-        show_numbers = st.toggle("🔢 Raster-Zahlenwerte auf Karte", value=False)
+        show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
 
 with tab_design:
     st.subheader("📥 Gespeicherte Skala laden")
@@ -478,16 +487,22 @@ with tab_design:
     st.subheader(f"📊 Skala anpassen")
     st.session_state.design['cbar_step'] = st.number_input("Zeige nur jeden X-ten Wert als Zahl:", 1, 20, int(st.session_state.design.get('cbar_step', 1)))
     
-    # 1. UI-Bugfix für Listen: Eindeutige UUIDs zuweisen, falls noch nicht vorhanden
     for item in st.session_state.config[param_choice]:
         if "_id" not in item: item["_id"] = str(uuid.uuid4())
     
     new_config = []
-    # 2. UI-Bugfix für Listen: UUID als fixen Key verwenden!
     for i, item in enumerate(st.session_state.config[param_choice]):
         item_id = item["_id"]
         c1, c2, c3 = st.columns([2, 2, 1])
-        with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{item_id}", label_visibility="collapsed")
+        
+        if param_choice == "Signifikantes Wetter":
+            with c1: 
+                lbl = SIG_WETTER_LABELS.get(int(item['value']), f"Kategorie {int(item['value'])}")
+                st.markdown(f"<div style='padding-top:8px; font-size:14px;'>{lbl}</div>", unsafe_allow_html=True)
+                val = item['value']
+        else:
+            with c1: val = st.number_input("W", value=float(item['value']), step=1.0, key=f"v_{item_id}", label_visibility="collapsed")
+            
         with c2: col = st.color_picker("F", value=item['color'], key=f"c_{item_id}", label_visibility="collapsed")
         with c3:
             if st.button("🗑️", key=f"d_{item_id}"): 
@@ -506,7 +521,7 @@ with tab_design:
         if st.button("💾 Speichern"): save_param_config(param_choice, st.session_state.config[param_choice])
 
 # --- HAUPTBEREICH & SCHIEBEREGLER ---
-max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else 48)
+max_h = 384 if "GFS" in model_choice else (120 if "EU" in model_choice else (27 if "RUC" in model_choice else 48))
 step_h = 3 if "GFS" in model_choice else 1
 tz_berlin = ZoneInfo("Europe/Berlin")
 start_time_local = run_time.astimezone(tz_berlin)
@@ -523,7 +538,6 @@ selected_datetime = st.slider("Zeitpunkt", min_value=start_time_local, max_value
 chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
 st.session_state.f_hour = chosen_f_hour
 
-# Sicherer Cache, der JEDE Änderung (Design, Farbe, Overlays) sofort bemerkt
 config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers))
 cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
