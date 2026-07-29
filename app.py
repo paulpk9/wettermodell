@@ -86,10 +86,11 @@ if "param_choice" not in st.session_state: st.session_state.param_choice = "Temp
 if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
 
 SIG_WETTER_LABELS = {
-    1: "Regen (leicht)", 2: "Regen (mäßig)", 3: "Regen (stark)",
-    4: "Schneeregen (leicht)", 5: "Schneeregen (mäßig)", 6: "Schneeregen (stark)",
-    7: "Schnee (leicht)", 8: "Schnee (mäßig)", 9: "Schnee (stark)",
-    10: "Gewitter (leicht)", 11: "Gewitter (stark)"
+    1: "Nebel",
+    2: "Regen (leicht)", 3: "Regen (mäßig)", 4: "Regen (stark)",
+    5: "Schneeregen (leicht)", 6: "Schneeregen (mäßig)", 7: "Schneeregen (stark)",
+    8: "Schnee (leicht)", 9: "Schnee (mäßig)", 10: "Schnee (stark)",
+    11: "Gewitter (leicht)", 12: "Gewitter (stark)"
 }
 
 DEFAULT_CONFIGS = {
@@ -106,10 +107,10 @@ DEFAULT_CONFIGS = {
     "Scherung 0-6 km": [{"value": 0.0, "color": "#ffffff"}, {"value": 20.0, "color": "#ffffcc"}, {"value": 40.0, "color": "#fd8d3c"}, {"value": 60.0, "color": "#e31a1c"}, {"value": 80.0, "color": "#800026"}],
     "Potentielle Hagelgröße": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 3.0, "color": "#1f78b4"}, {"value": 5.0, "color": "#33a02c"}, {"value": 7.0, "color": "#e31a1c"}],
     "Signifikantes Wetter": [
-        {"value": 1.0, "color": "#a1d99b"}, {"value": 2.0, "color": "#31a354"}, {"value": 3.0, "color": "#006d2c"},
-        {"value": 4.0, "color": "#fcc5c0"}, {"value": 5.0, "color": "#f768a1"}, {"value": 6.0, "color": "#ae017e"},
-        {"value": 7.0, "color": "#c6dbef"}, {"value": 8.0, "color": "#6baed6"}, {"value": 9.0, "color": "#2171b5"},
-        {"value": 10.0, "color": "#fd8d3c"}, {"value": 11.0, "color": "#e31a1c"}
+        {"value": 1.0, "color": "#d9d9d9"}, {"value": 2.0, "color": "#a1d99b"}, {"value": 3.0, "color": "#31a354"},
+        {"value": 4.0, "color": "#006d2c"}, {"value": 5.0, "color": "#fcc5c0"}, {"value": 6.0, "color": "#f768a1"},
+        {"value": 7.0, "color": "#ae017e"}, {"value": 8.0, "color": "#c6dbef"}, {"value": 9.0, "color": "#6baed6"},
+        {"value": 10.0, "color": "#2171b5"}, {"value": 11.0, "color": "#fd8d3c"}, {"value": 12.0, "color": "#e31a1c"}
     ]
 }
 
@@ -152,7 +153,7 @@ def load_param_config(param_name):
             data = json.loads(repo.get_contents(get_config_filepath(param_name)).decoded_content.decode())
             if isinstance(data, list): return data
         except: pass
-    return DEFAULT_CONFIGS.get(param_name, DEFAULT_CONFIGS["Temperatur (2m)"])
+    return DEFAULT_CONFIGS.get(param_name, DEFAULT_CONFIGS.get("Temperatur (2m)"))
 
 def save_param_config(param_name, config_list):
     g, repo_name = get_github_client(), st.secrets.get("GITHUB_REPO")
@@ -189,8 +190,9 @@ def get_satellite_bg(lon_min, lon_max, lat_min, lat_max):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ensemble_data(lat, lon, param, model):
-    if "GFS" in model: days = 16
-    elif "ECMWF" in model: days = 15
+    # FIX: Exaktere Modellerkennung (gfs_seamless läuft für 16 Tage, ECMWF für 15)
+    if "gfs" in model.lower(): days = 16
+    elif "ecmwf" in model.lower(): days = 15
     else: days = 7
     
     url = f"https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat}&longitude={lon}&hourly={param}&models={model}&forecast_days={days}"
@@ -204,6 +206,7 @@ def fetch_ensemble_data(lat, lon, param, model):
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
     if "RUC" in model_name: step, delay = 1, 2.0
+    elif "AIFS" in model_name: step, delay = 12, 9.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
     else: step, delay = 3, 2.5
@@ -243,8 +246,7 @@ def get_topography(model):
 
 def get_raw_grib(run_time, forecast_hour, model, param_name):
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
-    
-    if param_name in ["CAPE & CIN (Deckel)", "Scherung 0-1 km", "Scherung 0-6 km"]: return None, None, None
+    if param_name == "CAPE & CIN (Deckel)": return None, None, None
 
     if "GFS" in model:
         vm = {
@@ -256,14 +258,15 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
         return download_and_extract(f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}&{fs}" if fs else None)
     
+    # FIX: Angepasste Variablennamen für die Windebenen & Hagel bei ICON-D2
     dm = {
         "Temperatur (2m)": ("t_2m", "2d_t_2m", None), "Windböen 10m": ("vmax_10m", "2d_vmax_10m", None), 
         "Akk. Niederschlag (mm)": ("tot_prec", "2d_tot_prec", None), "Niederschlagsrate (mm/h)": ("tot_prec", "2d_tot_prec", None), 
         "500 hPa Geopot. Height": ("fi", "fi", "500"), "850 hPa Temp.": ("t", "t", "850"), 
         "MLCAPE": ("cape_ml", "cape_ml", None), "CIN": ("cin_ml", "cin_ml", None),
-        "PMSL": ("pmsl", "pmsl", None), "Signifikantes Wetter": ("ww", "2d_ww", None),
-        "Potentielle Hagelgröße": ("dzhail_mx", "2d_dzhail_mx", None),
-        "U-Wind 10m": ("u_10m", "2d_u_10m", None), "V-Wind 10m": ("v_10m", "2d_v_10m", None),
+        "PMSL": ("pmsl", "pmsl", None), "Signifikantes Wetter": ("ww", "ww", None),
+        "Potentielle Hagelgröße": ("dzhail_mx", "dzhail_mx", None),
+        "U-Wind 10m": ("u_10m", "u_10m", None), "V-Wind 10m": ("v_10m", "v_10m", None),
         "U-Wind 850hPa": ("u", "u", "850"), "V-Wind 850hPa": ("v", "v", "850"),
         "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500")
     }
@@ -291,23 +294,36 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         if cape_vals is None or cin_vals is None: return None, None, None, "", None, None
         return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
 
+    # FIX: Robustere Behandlung von Windscherung (verhindert Tuple-Index-Fehler)
     if param_name == "Scherung 0-1 km":
-        lons, lats, u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m")
-        _, _, v10 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 10m")
-        _, _, u850 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 850hPa")
-        _, _, v850 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 850hPa")
-        if u10 is None or u850 is None: return None, None, None, "", None, None
-        shear = np.sqrt((np.squeeze(u850) - np.squeeze(u10))**2 + (np.squeeze(v850) - np.squeeze(v10))**2) * 1.94384 # in knoten
-        return lons, lats, shear, "Scherung 0-1 km (kn)", None, None
+        res_u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m")
+        res_v10 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 10m")
+        res_u850 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 850hPa")
+        res_v850 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 850hPa")
+        if res_u10[2] is None or res_u850[2] is None: return None, None, None, "", None, None
+        
+        u10 = res_u10[2][0] if isinstance(res_u10[2], tuple) else res_u10[2]
+        v10 = res_v10[2][0] if isinstance(res_v10[2], tuple) else res_v10[2]
+        u850 = res_u850[2][0] if isinstance(res_u850[2], tuple) else res_u850[2]
+        v850 = res_v850[2][0] if isinstance(res_v850[2], tuple) else res_v850[2]
+        
+        shear = np.sqrt((np.squeeze(u850) - np.squeeze(u10))**2 + (np.squeeze(v850) - np.squeeze(v10))**2) * 1.94384
+        return res_u10[0], res_u10[1], shear, "Scherung 0-1 km (kn)", None, None
 
     if param_name == "Scherung 0-6 km":
-        lons, lats, u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m")
-        _, _, v10 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 10m")
-        _, _, u500 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 500hPa")
-        _, _, v500 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 500hPa")
-        if u10 is None or u500 is None: return None, None, None, "", None, None
-        shear = np.sqrt((np.squeeze(u500) - np.squeeze(u10))**2 + (np.squeeze(v500) - np.squeeze(v10))**2) * 1.94384 # in knoten
-        return lons, lats, shear, "Scherung 0-6 km (kn)", None, None
+        res_u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m")
+        res_v10 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 10m")
+        res_u500 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 500hPa")
+        res_v500 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 500hPa")
+        if res_u10[2] is None or res_u500[2] is None: return None, None, None, "", None, None
+        
+        u10 = res_u10[2][0] if isinstance(res_u10[2], tuple) else res_u10[2]
+        v10 = res_v10[2][0] if isinstance(res_v10[2], tuple) else res_v10[2]
+        u500 = res_u500[2][0] if isinstance(res_u500[2], tuple) else res_u500[2]
+        v500 = res_v500[2][0] if isinstance(res_v500[2], tuple) else res_v500[2]
+        
+        shear = np.sqrt((np.squeeze(u500) - np.squeeze(u10))**2 + (np.squeeze(v500) - np.squeeze(v10))**2) * 1.94384
+        return res_u10[0], res_u10[1], shear, "Scherung 0-6 km (kn)", None, None
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
     if isinstance(vals, tuple): vals, p_raw = vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
@@ -332,17 +348,19 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Signifikantes Wetter":
         title = "Signifikantes Wetter"
         ww = np.zeros_like(vals)
-        ww[np.isin(vals, [50, 51, 58, 61, 80])] = 1
-        ww[np.isin(vals, [52, 53, 59, 62, 81])] = 2
-        ww[np.isin(vals, [54, 55, 63, 64, 65, 82])] = 3
-        ww[np.isin(vals, [68, 83])] = 4
-        ww[np.isin(vals, [69, 84])] = 5
-        ww[np.isin(vals, [84])] = 6
-        ww[np.isin(vals, [70, 71, 85])] = 7
-        ww[np.isin(vals, [72, 73, 86])] = 8
-        ww[np.isin(vals, [74, 75])] = 9
-        ww[np.isin(vals, [91, 92, 93, 94, 95])] = 10
-        ww[np.isin(vals, [96, 97, 98, 99])] = 11
+        # FIX: WMO 40-49 ist nun sauber dem Nebel (Kategorie 1) zugeordnet
+        ww[np.isin(vals, [40, 41, 42, 43, 44, 45, 46, 47, 48, 49])] = 1
+        ww[np.isin(vals, [50, 51, 58, 61, 80])] = 2
+        ww[np.isin(vals, [52, 53, 59, 62, 81])] = 3
+        ww[np.isin(vals, [54, 55, 63, 64, 65, 82])] = 4
+        ww[np.isin(vals, [68, 83])] = 5
+        ww[np.isin(vals, [69])] = 6
+        ww[np.isin(vals, [84])] = 7
+        ww[np.isin(vals, [70, 71, 85])] = 8
+        ww[np.isin(vals, [72, 73, 86])] = 9
+        ww[np.isin(vals, [74, 75, 76, 77, 78, 79, 87, 88, 89])] = 10
+        ww[np.isin(vals, [91, 92, 93, 94, 95])] = 11
+        ww[np.isin(vals, [96, 97, 98, 99])] = 12
         ww[ww == 0] = np.nan
         vals = ww
 
@@ -374,13 +392,11 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
     else:
         cmap = mcolors.LinearSegmentedColormap.from_list("custom", list(zip([(v - min_v) / (max_v - min_v) for v in levels], colors)))
-        if is_satellite_active:
-            cmap.set_bad('none')
+        if is_satellite_active: cmap.set_bad('none')
         contour_levels = np.linspace(min_v, max_v, 150)
 
     fig, ax = plt.subplots(figsize=(10, 10))
     
-    # Transparenten Karten-Hintergrund für Satellitenbild erzwingen
     if is_satellite_active:
         fig.patch.set_facecolor(design['bg_color'])
         ax.set_facecolor('none')
@@ -501,7 +517,6 @@ with tab_main:
     run_label = st.selectbox("Modelllauf:", list(available_runs.keys()))
     run_time = available_runs[run_label]
     
-    # Parameter dynamisch anhand der Modellauswahl filtern
     param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)"]
     if "D2" in model_choice:
         param_list.extend(["Signifikantes Wetter", "Scherung 0-1 km", "Scherung 0-6 km", "Potentielle Hagelgröße"])
@@ -541,7 +556,7 @@ with tab_overlays:
     show_pmsl = st.toggle("💨 Isobaren (Luftdruck)", value=True) if param_choice == "850 hPa Temp." else False
     
     show_numbers = False
-    if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
+    if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "Potentielle Hagelgröße"]:
         show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
         
     show_satellite = False
@@ -596,7 +611,6 @@ with tab_design:
     for i, item in enumerate(st.session_state.config[param_choice]):
         item_id = item["_id"]
         c1, c2, c3 = st.columns([2, 2, 1])
-        
         if param_choice == "Signifikantes Wetter":
             with c1: val = st.selectbox("W", options=list(SIG_WETTER_LABELS.keys()), index=list(SIG_WETTER_LABELS.keys()).index(int(item['value'])) if int(item['value']) in SIG_WETTER_LABELS else 0, format_func=lambda x: SIG_WETTER_LABELS.get(x, str(x)), key=f"v_{item_id}", label_visibility="collapsed")
         else:
@@ -663,7 +677,6 @@ with tab_map:
                 lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, overlays_dict)
                 
                 if lons is not None:
-                    # Extremwerte für Deutschland berechnen (Nur wenn Region DE gewählt und es keine Kategorien sind)
                     extremes_txt = None
                     if region_choice == "Deutschland" and param_choice != "Signifikantes Wetter":
                         xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
@@ -683,7 +696,7 @@ with tab_map:
 
 with tab_ens:
     st.markdown("### 📈 Profi-Ensemble Prognose (Punktabfrage)")
-    st.info("Hinweis: Da Ensemble-Berechnungen tausende Gigabyte erfordern, wird diese Ansicht direkt aus der Open-Meteo API (ohne GRIB-Karten) für den exakten Ort generiert.")
+    st.info("Hinweis: Da Ensemble-Berechnungen tausende Gigabyte erfordern, wird diese Ansicht direkt aus der API generiert.")
     
     col_e1, col_e2, col_e3 = st.columns(3)
     
