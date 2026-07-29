@@ -1,0 +1,16 @@
+{
+    "bg_color": "#0E1117",
+    "title_bg": "#0E1117",
+    "text_color": "#FFFFFF",
+    "border_color": "#FFFFFF",
+    "border_alpha": 0.4,
+    "font_family": "monospace",
+    "cbar_step": 2,
+    "number_color": "#ffffff",
+    "number_outline": "#000000",
+    "title_size": 10,
+    "cbar_size": 10,
+    "line_width": 0.8,
+    "watermark": "Kr\u00fcger",
+    "discrete_colors": false
+}
