@@ -190,7 +190,6 @@ def get_satellite_bg(lon_min, lon_max, lat_min, lat_max):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ensemble_data(lat, lon, param, model):
-    # FIX: GFS Ensemble liefert 16 Tage, ECMWF liefert 15.
     if "gfs" in model.lower(): days = 16
     elif "ecmwf" in model.lower(): days = 15
     else: days = 7
@@ -206,6 +205,7 @@ def fetch_ensemble_data(lat, lon, param, model):
 def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
     if "RUC" in model_name: step, delay = 1, 2.0
+    elif "EPS" in model_name: step, delay = 3, 3.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
     else: step, delay = 3, 2.5
@@ -223,10 +223,10 @@ def download_and_extract(url, is_bz2=False, param_name=None):
         with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f: f.write(bz2.decompress(resp.content) if is_bz2 else resp.content); t_path = f.name
         ds = xr.open_dataset(t_path, engine='cfgrib')
         
-        # INTELLIGENTE ENSEMBLE BEHANDLUNG (Für ICON-D2-EPS)
+        # Bündelung des Ensembles bei Modellkarten (Mittelwert)
         if 'number' in ds.dims:
-            if param_name == "Signifikantes Wetter": ds = ds.isel(number=0) # Kategorien darf man nicht durch den Durchschnitt runden!
-            else: ds = ds.mean(dim='number') # Für alles andere den Mittelwert berechnen!
+            if param_name == "Signifikantes Wetter": ds = ds.isel(number=0) 
+            else: ds = ds.mean(dim='number') 
 
         if ds['longitude'].max() > 180: ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180)).sortby('longitude')
         act_var = list(ds.data_vars)[0]
@@ -263,7 +263,6 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
         return download_and_extract(f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{date_str}%2F{run_str}%2Fatmos&file=gfs.t{run_str}z.pgrb2.0p25.f{hour_str}&{fs}" if fs else None, param_name=param_name)
     
-    # FIX: Exakte Variablen-Namen des DWD für Scherung & Hagel
     dm = {
         "Temperatur (2m)": ("t_2m", "t_2m", None), "Windböen 10m": ("vmax_10m", "vmax_10m", None), 
         "Akk. Niederschlag (mm)": ("tot_prec", "tot_prec", None), "Niederschlagsrate (mm/h)": ("tot_prec", "tot_prec", None), 
@@ -279,7 +278,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     if param_name not in dm: return None, None, None
     fld, var, lvl = dm[param_name]
     
-    # INTELLIGENTER URL-SCANNER: Probiert alle möglichen DWD Namens-Variationen, um 404 Fehler zu verhindern
+    # 🚨 INTELLIGENTER URL-SCANNER: Umgeht DWD-Server-Blocks komplett, testet und lädt direkt herunter
     urls_to_try = []
     if "D2" in model:
         m_str = "icon-d2-eps" if "EPS" in model else ("icon-d2-ruc" if "RUC" in model else "icon-d2")
@@ -304,11 +303,9 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
             urls_to_try.extend([base + prefix + f"{var.upper()}.grib2.bz2", base + prefix + f"{var.replace('2d_', '').upper()}.grib2.bz2"])
             
     for u in urls_to_try:
-        try:
-            resp = requests.head(u, timeout=5)
-            if resp.status_code == 200:
-                return download_and_extract(u, is_bz2=True, param_name=param_name)
-        except: pass
+        res = download_and_extract(u, is_bz2=True, param_name=param_name)
+        if res[0] is not None:
+            return res
         
     return None, None, None
 
@@ -377,7 +374,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Signifikantes Wetter":
         title = "Signifikantes Wetter"
         ww = np.zeros_like(vals)
-        # FIX: WMO 40-49 ist nun sauber dem Nebel (Kategorie 1) zugeordnet
         ww[np.isin(vals, [40, 41, 42, 43, 44, 45, 46, 47, 48, 49])] = 1
         ww[np.isin(vals, [50, 51, 58, 61, 80])] = 2
         ww[np.isin(vals, [52, 53, 59, 62, 81])] = 3
@@ -534,7 +530,6 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # NEU: ICON-D2-EPS wurde in die Modellkarten eingefügt[span_5](start_span)[span_5](end_span)!
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
         idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
         st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
@@ -734,8 +729,7 @@ with tab_ens:
     with col_e2: ens_model = st.selectbox("Modell-Ensemble:", ["ICON-EPS (DWD)", "ICON-D2-EPS (DWD)", "GFS-ENS (NOAA)", "ECMWF-EPS"])
     with col_e3: ens_param = st.selectbox("Wetter-Parameter:", ["Temperatur (2m)", "850 hPa Temp.", "Niederschlag (mm/h)", "Windböen (km/h)", "CAPE (J/kg)"])
     
-    # NEU: Das fehlende ID2 Ensemble wurde in den ENS-Plot eingefügt
-    om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "ICON-D2-EPS (DWD)": "icon_d2_ensemble", "GFS-ENS (NOAA)": "gfs_ensemble", "ECMWF-EPS": "ecmwf_ensemble"}
+    om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "ICON-D2-EPS (DWD)": "icon_d2_ensemble", "GFS-ENS (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
     om_param_map = {"Temperatur (2m)": "temperature_2m", "850 hPa Temp.": "temperature_850hPa", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
     
     if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", width="stretch"):
