@@ -1,0 +1,46 @@
+[
+    {
+        "value": 1.0,
+        "color": "#12c100"
+    },
+    {
+        "value": 2.0,
+        "color": "#007f0a"
+    },
+    {
+        "value": 3.0,
+        "color": "#004304"
+    },
+    {
+        "value": 4.0,
+        "color": "#d98f00"
+    },
+    {
+        "value": 5.0,
+        "color": "#ca5d00"
+    },
+    {
+        "value": 6.0,
+        "color": "#d13a00"
+    },
+    {
+        "value": 7.0,
+        "color": "#3393f4"
+    },
+    {
+        "value": 8.0,
+        "color": "#004cdd"
+    },
+    {
+        "value": 9.0,
+        "color": "#1400dd"
+    },
+    {
+        "value": 10.0,
+        "color": "#df00ff"
+    },
+    {
+        "value": 11.0,
+        "color": "#88008d"
+    }
+]
