@@ -1,0 +1,50 @@
+[
+    {
+        "value": 0.0,
+        "color": "#f0f0f0"
+    },
+    {
+        "value": 1.0,
+        "color": "#e4e4e4"
+    },
+    {
+        "value": 10.0,
+        "color": "#d3d3d3"
+    },
+    {
+        "value": 20.0,
+        "color": "#c6c6c6"
+    },
+    {
+        "value": 30.0,
+        "color": "#b0b0b0"
+    },
+    {
+        "value": 40.0,
+        "color": "#999999"
+    },
+    {
+        "value": 50.0,
+        "color": "#878787"
+    },
+    {
+        "value": 60.0,
+        "color": "#707070"
+    },
+    {
+        "value": 70.0,
+        "color": "#545454"
+    },
+    {
+        "value": 80.0,
+        "color": "#3d3d3d"
+    },
+    {
+        "value": 90.0,
+        "color": "#2d2d2d"
+    },
+    {
+        "value": 100.0,
+        "color": "#1e1e1e"
+    }
+]
