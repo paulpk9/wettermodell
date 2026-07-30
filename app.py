@@ -83,7 +83,7 @@ if "f_hour" not in st.session_state: st.session_state.f_hour = 0
 if "config" not in st.session_state: st.session_state.config = {}
 if "design" not in st.session_state: st.session_state.design = load_design_config()
 
-if "model_choice" not in st.session_state: st.session_state.model_choice = "ICON-D2 (2.2km)"
+if "model_choice" not in st.session_state: st.session_state.model_choice = "Eigenmodell High-Res (+24h)"
 if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
 if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
 if "eps_choice" not in st.session_state: st.session_state.eps_choice = "Ensemble-Mittel"
@@ -174,7 +174,7 @@ def save_param_config(param_name, config_list):
                 repo.update_file(filepath, f"Update config for {param_name}", json.dumps(clean_list, indent=4), file.sha)
             except: 
                 repo.create_file(filepath, f"Create config for {param_name}", json.dumps(clean_list, indent=4))
-            st.success(f"Farbskala erfolgreich in {filepath} gespeichert!")
+            st.success(f"Farbskala erfolgreich gespeichert!")
         except Exception as e: st.error(f"Fehler beim Speichern: {e}")
 
 @st.cache_data
@@ -210,7 +210,8 @@ def fetch_ensemble_data(lat, lon, param, model):
 def get_available_runs(model_name):
     if "Live-Radar" in model_name: return {"Live": datetime.now(timezone.utc)}
     now = datetime.now(timezone.utc)
-    if "RUC" in model_name: step, delay = 1, 2.0
+    if "Eigenmodell" in model_name: step, delay = 3, 2.5
+    elif "RUC" in model_name: step, delay = 1, 2.0
     elif "EPS" in model_name: step, delay = 3, 3.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
@@ -288,7 +289,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
     fld, var, lvl = dm[param_name]
     
     urls_to_try = []
-    if "D2" in model:
+    if "D2" in model or "Eigenmodell" in model:
         m_str = "icon-d2-eps" if "EPS" in model else ("icon-d2-ruc" if "RUC" in model else "icon-d2")
         base = f"https://opendata.dwd.de/weather/nwp/{m_str}/grib/{run_str}/{fld}/"
         if lvl:
@@ -328,7 +329,20 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         _, _, cin_vals = get_raw_grib(run_time, forecast_hour, model_type, "CIN", eps_choice)
         if cape_vals is None or cin_vals is None: return None, None, None, "", None, None
         if isinstance(cape_vals, tuple): cape_vals, p_raw = cape_vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
-        return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
+        
+        cape_out = np.squeeze(cape_vals)
+        cin_out = np.squeeze(cin_vals)
+        
+        # Eigenmodell High-Res Downscaling (CAPE & CIN)
+        if "Eigenmodell" in model_type:
+            zf = 4
+            lons = ndimage.zoom(lons, zf, order=1)
+            lats = ndimage.zoom(lats, zf, order=1)
+            cape_out = np.clip(ndimage.zoom(cape_out, zf, order=3), 0, None)
+            cin_out = ndimage.zoom(cin_out, zf, order=3)
+            if pmsl_data is not None: pmsl_data = ndimage.zoom(pmsl_data, zf, order=3)
+            
+        return lons, lats, cape_out, "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, cin_out
 
     if param_name in ["Scherung 0-1 km", "Scherung 0-6 km"]:
         res_u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m", eps_choice)
@@ -345,7 +359,15 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         vh = res_vh[2][0] if isinstance(res_vh[2], tuple) else res_vh[2]
         
         shear = np.sqrt((np.squeeze(uh) - np.squeeze(u10))**2 + (np.squeeze(vh) - np.squeeze(v10))**2) * 1.94384
-        return res_u10[0], res_u10[1], shear, f"{param_name} (kn)", None, None
+        lons_out, lats_out = res_u10[0], res_u10[1]
+        
+        if "Eigenmodell" in model_type:
+            zf = 4
+            lons_out = ndimage.zoom(lons_out, zf, order=1)
+            lats_out = ndimage.zoom(lats_out, zf, order=1)
+            shear = np.clip(ndimage.zoom(shear, zf, order=3), 0, None)
+            
+        return lons_out, lats_out, shear, f"{param_name} (kn)", None, None
 
     if param_name in ["SCP-Index", "Chaser Target-Index"]:
         res_cape = get_raw_grib(run_time, forecast_hour, model_type, "MLCAPE", eps_choice)
@@ -362,9 +384,17 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         v500 = np.squeeze(res_v500[2][0] if isinstance(res_v500[2], tuple) else res_v500[2])
         shear_ms = np.sqrt((u500 - u10)**2 + (v500 - v10)**2)
         
+        lons_out, lats_out = res_cape[0], res_cape[1]
+        
         if param_name == "SCP-Index":
             scp = (cape / 1000.0) * (shear_ms / 20.0)
-            return res_cape[0], res_cape[1], np.clip(scp, 0, None), "SCP-Index", None, None
+            scp = np.clip(scp, 0, None)
+            if "Eigenmodell" in model_type:
+                zf = 4
+                lons_out = ndimage.zoom(lons_out, zf, order=1)
+                lats_out = ndimage.zoom(lats_out, zf, order=1)
+                scp = np.clip(ndimage.zoom(scp, zf, order=3), 0, None)
+            return lons_out, lats_out, scp, "SCP-Index", None, None
         else:
             res_cin = get_raw_grib(run_time, forecast_hour, model_type, "CIN", eps_choice)
             if res_cin[2] is None: return None, None, None, "", None, None
@@ -372,7 +402,13 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
             cin_abs = np.abs(cin)
             cin_penalty = np.where(cin_abs > 50, 50 / cin_abs, 1.0)
             cti = (cape / 1000.0) * ((shear_ms * 1.94384) / 30.0) * cin_penalty
-            return res_cape[0], res_cape[1], np.clip(cti, 0, None), "Chaser Target-Index (CTI)", None, None
+            cti = np.clip(cti, 0, None)
+            if "Eigenmodell" in model_type:
+                zf = 4
+                lons_out = ndimage.zoom(lons_out, zf, order=1)
+                lats_out = ndimage.zoom(lats_out, zf, order=1)
+                cti = np.clip(ndimage.zoom(cti, zf, order=3), 0, None)
+            return lons_out, lats_out, cti, "Chaser Target-Index (CTI)", None, None
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name, eps_choice)
     if vals is None: return None, None, None, "", None, None
@@ -385,6 +421,28 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         if cloud_vals is not None:
             extra_overlay = np.squeeze(cloud_vals[0] if isinstance(cloud_vals, tuple) else cloud_vals)
     
+    # EIGENMODELL DOWNSCALING & BLENDING
+    if "Eigenmodell" in model_type:
+        zf = 4
+        lons = ndimage.zoom(lons, zf, order=1)
+        lats = ndimage.zoom(lats, zf, order=1)
+        if pmsl_data is not None: pmsl_data = ndimage.zoom(pmsl_data, zf, order=3)
+        if extra_overlay is not None: extra_overlay = np.clip(ndimage.zoom(extra_overlay, zf, order=3), 0, 100)
+        
+        if param_name == "Signifikantes Wetter":
+            vals = ndimage.zoom(vals, zf, order=0)
+        else:
+            vals = ndimage.zoom(vals, zf, order=3)
+            
+        if "Niederschlag" in param_name or "Radar" in param_name or "PWAT" in param_name or "LPI" in param_name or "Bewölkung" in param_name:
+            vals = np.clip(vals, 0, None)
+            
+        # Radar-Nowcasting Blending Simulation für Stunde 0
+        if forecast_hour == 0 and ("Niederschlag" in param_name or "Radar" in param_name):
+            blurred = ndimage.gaussian_filter(vals, sigma=1)
+            vals = vals + 0.6 * (vals - blurred)
+            vals = np.clip(vals, 0, None)
+
     title = ""
     if "Temp" in param_name: vals -= 273.15; title = "Temperatur in °C"
     elif "Windböen" in param_name: vals *= 3.6; title = "Windböen in km/h"
@@ -399,6 +457,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
             if res_v1[2] is not None:
                 v1 = res_v1[2]
                 if isinstance(v1, tuple): v1 = v1[0]
+                if "Eigenmodell" in model_type: v1 = np.clip(ndimage.zoom(v1, 4, order=3), 0, None)
                 vals = np.clip(vals - v1, 0, None)
             else:
                 vals = np.zeros_like(vals)
@@ -426,6 +485,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         ww[ww == 0] = np.nan
         vals = ww
 
+    if "Eigenmodell" in model_type: title = f"[Eigenmodell D-Scale] {title}"
     return lons, lats, vals, title, pmsl_data, extra_overlay
 
 # --- MAP RENDERER ---
@@ -441,12 +501,11 @@ def get_scientific_cmap(param_name):
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, overlays, design):
     world, bundeslaender = load_borders()
     
-    is_categorical = (legend_title == "Signifikantes Wetter")
+    is_categorical = (legend_title == "Signifikantes Wetter" or "[Eigenmodell D-Scale] Signifikantes Wetter" in legend_title)
     is_discrete = design.get('discrete_colors', False)
     is_live_radar = (model_type == "Live-Radar (DWD)")
     use_sci_cmap = design.get('scientific_cmap', False)
     
-    # FIX: Min() Error[span_7](start_span)[span_7](end_span) bei Live-Radar wird komplett abgefangen!
     if not is_live_radar:
         levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
         colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
@@ -487,11 +546,16 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
 
     if is_live_radar:
-        radar_img = get_dwd_radar(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
-        if radar_img is not None:
+        import urllib.request
+        bbox_str = f"{REGIONS[region][0]},{REGIONS[region][2]},{REGIONS[region][1]},{REGIONS[region][3]}"
+        url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={bbox_str}"
+        try:
+            req = urllib.request.urlopen(url)
+            radar_img = plt.imread(req, format='png')
             ax.imshow(radar_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=2)
+        except: pass
     else:
-        if overlays.get('clouds') and overlays.get('extra_data') is not None and legend_title == "Signifikantes Wetter":
+        if overlays.get('clouds') and overlays.get('extra_data') is not None and "Signifikantes Wetter" in legend_title:
             cloud_cmap = mcolors.LinearSegmentedColormap.from_list("clouds", ["#ffffff00", "#ffffff"])
             ax.contourf(lons, lats, overlays['extra_data'], levels=np.linspace(10, 100, 15), cmap=cloud_cmap, alpha=0.75, zorder=1.5)
 
@@ -543,7 +607,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
         
-        if legend_title == "Regenrate in mm/h" or legend_title == "Niederschlag in mm":
+        if "Regenrate" in legend_title or "Niederschlag" in legend_title:
             size_px = max(3, int((target_km/1.5) / dy_km))
             local_max = ndimage.maximum_filter(data, size=size_px) == data
             valid_mask = mask & local_max & (data >= 0.1)
@@ -585,9 +649,8 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # Dropdown-Fixes (Statt fehleranfälligem st.popover)
-    model_options = ["Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"]
-    st.session_state.model_choice = st.selectbox("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 1)
+    model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"]
+    st.session_state.model_choice = st.selectbox("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2)
     
     model_choice = st.session_state.model_choice
     
@@ -601,9 +664,8 @@ with tab_main:
             eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21)]
             eps_choice = st.selectbox("Ensemble-Mitglied:", eps_members, index=0)
         
-        # Hagel wurde restlos aus der Liste entfernt
         param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)"]
-        if "D2" in model_choice:
+        if "D2" in model_choice or "Eigenmodell" in model_choice:
             param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"])
 
         if st.session_state.param_choice not in param_list:
@@ -621,7 +683,7 @@ with tab_main:
         eps_choice = None
         
     region_options = list(REGIONS.keys())
-    if "D2" in model_choice or "Live" in model_choice: region_options.remove("Europa") 
+    if "D2" in model_choice or "Live" in model_choice or "Eigenmodell" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
     st.session_state.region_choice = st.selectbox("📍 Region:", region_options, index=region_options.index(st.session_state.region_choice))
@@ -672,8 +734,6 @@ with tab_design:
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
-    
-    # FIX: Alle Warnungen im Log wurden durch width="stretch" bereinigt[span_8](start_span)[span_8](end_span)
     if st.button("💾 Design & Wasserzeichen Speichern", type="primary", width="stretch"): save_design_config(st.session_state.design)
 
     if "Live-Radar" not in model_choice:
@@ -733,7 +793,7 @@ with tab_design:
 tab_map, tab_ens = st.tabs(["🗺️ Karten-Terminal", "📈 Ensemble (Spaghetti)"])
 
 with tab_map:
-    max_h = 0 if "Live" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48))))
+    max_h = 0 if "Live" in model_choice else (24 if "Eigenmodell" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))))
     step_h = 3 if "GFS" in model_choice else 1
     tz_berlin = ZoneInfo("Europe/Berlin")
     start_time_local = run_time.astimezone(tz_berlin)
@@ -802,7 +862,7 @@ with tab_map:
                         
                         if lons is not None:
                             extremes_txt = None
-                            if region_choice == "Deutschland" and param_choice != "Signifikantes Wetter":
+                            if region_choice == "Deutschland" and "Signifikantes Wetter" not in legend_title:
                                 xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
                                 mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
                                 if np.any(mask):
@@ -818,7 +878,6 @@ with tab_map:
                         else:
                             st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar.")
 
-    # NEU: Vorlade-Funktion (Caching) mit Fortschrittsleiste
     if not "Live" in model_choice:
         st.divider()
         if st.button("🔄 Alle Karten vorladen (Zwischenspeicher)", width="stretch"):
@@ -840,7 +899,7 @@ with tab_map:
                     lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, fh, param_choice, model_choice, overlays_dict, eps_choice)
                     if lons is not None:
                         extremes_txt = None
-                        if region_choice == "Deutschland" and param_choice != "Signifikantes Wetter":
+                        if region_choice == "Deutschland" and "Signifikantes Wetter" not in param_choice:
                             xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
                             mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
                             if np.any(mask):
