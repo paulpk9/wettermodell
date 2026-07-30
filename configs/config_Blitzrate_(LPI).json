@@ -5,7 +5,7 @@
     },
     {
         "value": 0.1,
-        "color": "#e2e200"
+        "color": "#e2c800"
     },
     {
         "value": 5.0,
@@ -25,10 +25,22 @@
     },
     {
         "value": 40.0,
-        "color": "#b026b0"
+        "color": "#941094"
     },
     {
         "value": 50.0,
-        "color": "#f685ff"
+        "color": "#ba45c5"
+    },
+    {
+        "value": 60.0,
+        "color": "#de6be5"
+    },
+    {
+        "value": 70.0,
+        "color": "#f8aaff"
+    },
+    {
+        "value": 80.0,
+        "color": "#f8d3ff"
     }
 ]
