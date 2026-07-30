@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import xarray as xr
 import scipy.ndimage as ndimage
 import io
+from PIL import Image
 
 # --- SEITEN-LAYOUT & CSS ---
 st.set_page_config(page_title="Profi-Wetterterminal", page_icon="🌤️", layout="wide")
@@ -515,7 +516,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     is_blanko = (legend_title == "Basiskarte (ohne Daten)")
     use_sci_cmap = design.get('scientific_cmap', False)
     
-    # FIX[span_5](start_span)[span_5](end_span): Kein min()/max() Aufruf bei leeren Config-Listen (Radar oder Blanko)
     if not is_live_radar and not is_blanko:
         levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
         colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
@@ -654,7 +654,6 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # NEU: Dropdowns statt der fehleranfälligen Popovers
     model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"]
     st.session_state.model_choice = st.selectbox("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2)
     
@@ -670,7 +669,6 @@ with tab_main:
             eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21)]
             eps_choice = st.selectbox("Ensemble-Mitglied:", eps_members, index=0)
         
-        # NEU: Blanko-Karte in der Liste, Hagel entfernt
         param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
         if "D2" in model_choice or "Eigenmodell" in model_choice:
             param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"])
@@ -742,7 +740,6 @@ with tab_design:
     
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
     
-    # FIX: Alle Warnungen im Log wurden durch width="stretch" bereinigt[span_6](start_span)[span_6](end_span)
     if st.button("💾 Design & Wasserzeichen Speichern", type="primary", use_container_width=True): save_design_config(st.session_state.design)
 
     if "Live-Radar" not in model_choice and param_choice != "Blanko / Nur Basiskarte":
@@ -871,7 +868,7 @@ with tab_map:
                         
                         if lons is not None:
                             extremes_txt = None
-                            if region_choice == "Deutschland" and "Signifikantes Wetter" not in legend_title and param_choice != "Blanko / Nur Basiskarte":
+                            if region_choice == "Deutschland" and "Signifikantes Wetter" not in param_choice and param_choice != "Blanko / Nur Basiskarte":
                                 xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
                                 mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
                                 if np.any(mask):
@@ -938,7 +935,6 @@ with tab_ens:
     with col_e2: ens_model = st.selectbox("Modell-Ensemble:", ["ICON-EPS (DWD)", "ICON-D2-EPS (DWD)", "GFS-ENS (NOAA)", "ECMWF-EPS"])
     with col_e3: ens_param = st.selectbox("Wetter-Parameter:", ["Temperatur (2m)", "850 hPa Temp.", "Niederschlag (mm/h)", "Windböen (km/h)", "CAPE (J/kg)"])
     
-    # FIX: Open-Meteo Namen für Modelle repariert (ID2-ENS wird jetzt unterstützt)
     om_model_map = {"ICON-EPS (DWD)": "icon_seamless", "ICON-D2-EPS (DWD)": "icon_d2", "GFS-ENS (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
     om_param_map = {"Temperatur (2m)": "temperature_2m", "850 hPa Temp.": "temperature_850hPa", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
     
