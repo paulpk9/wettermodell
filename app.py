@@ -106,6 +106,11 @@ DEFAULT_CONFIGS = {
     "Scherung 0-1 km": [{"value": 0.0, "color": "#ffffff"}, {"value": 15.0, "color": "#ffffcc"}, {"value": 30.0, "color": "#fd8d3c"}, {"value": 45.0, "color": "#e31a1c"}, {"value": 60.0, "color": "#800026"}],
     "Scherung 0-6 km": [{"value": 0.0, "color": "#ffffff"}, {"value": 20.0, "color": "#ffffcc"}, {"value": 40.0, "color": "#fd8d3c"}, {"value": 60.0, "color": "#e31a1c"}, {"value": 80.0, "color": "#800026"}],
     "Potentielle Hagelgröße": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 3.0, "color": "#1f78b4"}, {"value": 5.0, "color": "#33a02c"}, {"value": 7.0, "color": "#e31a1c"}],
+    "Gesamtbewölkung (%)": [
+        {"value": 0.0, "color": "#f0f0f0"}, {"value": 25.0, "color": "#c6dbef"}, 
+        {"value": 50.0, "color": "#9ecae1"}, {"value": 75.0, "color": "#6baed6"}, 
+        {"value": 100.0, "color": "#3182bd"}
+    ],
     "Signifikantes Wetter": [
         {"value": 1.0, "color": "#d9d9d9"}, {"value": 2.0, "color": "#a1d99b"}, {"value": 3.0, "color": "#31a354"},
         {"value": 4.0, "color": "#006d2c"}, {"value": 5.0, "color": "#fcc5c0"}, {"value": 6.0, "color": "#f768a1"},
@@ -114,8 +119,9 @@ DEFAULT_CONFIGS = {
     ]
 }
 
+# ERWEITERT: Deutschland wurde deutlich in die Breite gezogen [2.5 bis 17.5], um den gesamten Platz zu nutzen!
 REGIONS = {
-    "Europa": [-15.0, 30.0, 35.0, 65.0], "Deutschland": [5.5, 15.5, 47.0, 55.0],
+    "Europa": [-15.0, 30.0, 35.0, 65.0], "Deutschland": [2.5, 17.5, 47.0, 55.0],
     "Baden-Württemberg": [7.5, 10.5, 47.5, 49.8], "Bayern": [8.5, 14.0, 47.0, 50.5],
     "Brandenburg / Berlin": [11.0, 15.0, 51.0, 53.5], "Hessen": [7.7, 10.2, 49.3, 51.7],
     "Niedersachsen / Bremen": [6.5, 11.6, 51.2, 54.0], "Nordrhein-Westfalen": [5.8, 9.5, 50.3, 52.5],
@@ -223,7 +229,6 @@ def download_and_extract(url, is_bz2=False, param_name=None):
         with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f: f.write(bz2.decompress(resp.content) if is_bz2 else resp.content); t_path = f.name
         ds = xr.open_dataset(t_path, engine='cfgrib')
         
-        # Bündelung des Ensembles bei Modellkarten (Mittelwert)
         if 'number' in ds.dims:
             if param_name == "Signifikantes Wetter": ds = ds.isel(number=0) 
             else: ds = ds.mean(dim='number') 
@@ -257,7 +262,8 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         vm = {
             "Temperatur (2m)": "var_TMP=on&lev_2_m_above_ground=on", "Akk. Niederschlag (mm)": "var_APCP=on&lev_surface=on", 
             "Windböen 10m": "var_GUST=on&lev_surface=on", "Niederschlagsrate (mm/h)": "var_PRATE=on&lev_surface=on",
-            "MLCAPE": "var_CAPE=on&lev_surface=on", "CIN": "var_CIN=on&lev_surface=on", "PMSL": "var_PRMSL=on&lev_mean_sea_level=on"
+            "MLCAPE": "var_CAPE=on&lev_surface=on", "CIN": "var_CIN=on&lev_surface=on", "PMSL": "var_PRMSL=on&lev_mean_sea_level=on",
+            "Gesamtbewölkung (%)": "var_TCDC=on&lev_entire_atmosphere=on"
         }
         fs = vm.get(param_name, "")
         if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
@@ -270,6 +276,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
         "MLCAPE": ("cape_ml", "cape_ml", None), "CIN": ("cin_ml", "cin_ml", None),
         "PMSL": ("pmsl", "pmsl", None), "Signifikantes Wetter": ("ww", "ww", None),
         "Potentielle Hagelgröße": ("dzhail_mx", "dzhail_mx", None),
+        "Gesamtbewölkung (%)": ("clct", "clct", None),
         "U-Wind 10m": ("u_10m", "u_10m", None), "V-Wind 10m": ("v_10m", "v_10m", None),
         "U-Wind 850hPa": ("u", "u", "850"), "V-Wind 850hPa": ("v", "v", "850"),
         "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500")
@@ -278,7 +285,6 @@ def get_raw_grib(run_time, forecast_hour, model, param_name):
     if param_name not in dm: return None, None, None
     fld, var, lvl = dm[param_name]
     
-    # 🚨 INTELLIGENTER URL-SCANNER: Umgeht DWD-Server-Blocks komplett, testet und lädt direkt herunter
     urls_to_try = []
     if "D2" in model:
         m_str = "icon-d2-eps" if "EPS" in model else ("icon-d2-ruc" if "RUC" in model else "icon-d2")
@@ -316,8 +322,8 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         lons, lats, cape_vals = get_raw_grib(run_time, forecast_hour, model_type, "MLCAPE")
         _, _, cin_vals = get_raw_grib(run_time, forecast_hour, model_type, "CIN")
         
-        if isinstance(cape_vals, tuple): cape_vals, p_raw = cape_vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
         if cape_vals is None or cin_vals is None: return None, None, None, "", None, None
+        if isinstance(cape_vals, tuple): cape_vals, p_raw = cape_vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
         return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
 
     if param_name == "Scherung 0-1 km":
@@ -351,14 +357,22 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         return res_u10[0], res_u10[1], shear, "Scherung 0-6 km (kn)", None, None
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name)
-    if isinstance(vals, tuple): vals, p_raw = vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
     if vals is None: return None, None, None, "", None, None
+    if isinstance(vals, tuple): vals, p_raw = vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
     vals = np.squeeze(vals)
+    
+    # Cloud Overlay Laden, wenn wir im Sig. Wetter sind und es gewollt ist
+    if param_name == "Signifikantes Wetter" and overlays.get('clouds'):
+        _, _, cloud_vals = get_raw_grib(run_time, forecast_hour, model_type, "Gesamtbewölkung (%)")
+        if cloud_vals is not None:
+            if isinstance(cloud_vals, tuple): cloud_vals = cloud_vals[0]
+            extra_overlay = np.squeeze(cloud_vals)
     
     title = ""
     if "Temp" in param_name: vals -= 273.15; title = "Temperatur in °C"
     elif "Windböen" in param_name: vals *= 3.6; title = "Windböen in km/h"
     elif param_name == "Akk. Niederschlag (mm)": title = "Niederschlag in mm"
+    elif param_name == "Gesamtbewölkung" in param_name: title = "Gesamtbewölkung in %"
     elif param_name == "Niederschlagsrate (mm/h)":
         if forecast_hour > 0:
             res_v1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)")
@@ -386,7 +400,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         ww[np.isin(vals, [74, 75, 76, 77, 78, 79, 87, 88, 89])] = 10
         ww[np.isin(vals, [91, 92, 93, 94, 95])] = 11
         ww[np.isin(vals, [96, 97, 98, 99])] = 12
-        ww[ww == 0] = np.nan
+        ww[ww == 0] = np.nan # Alles unter WMO Code 40 wird komplett transparent!
         vals = ww
 
     return lons, lats, vals, title, pmsl_data, extra_overlay
@@ -409,6 +423,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     
     if is_categorical:
         cmap = mcolors.ListedColormap(colors)
+        cmap.set_bad('none') # Zwingt Matplotlib, NaN wirklich durchsichtig zu machen
         bounds = [v - 0.5 for v in levels] + [levels[-1] + 0.5]
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
     elif is_discrete:
@@ -433,18 +448,34 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
         
+    # ZORDER HIERARCHIE
+    # 0 = Satellit, 1 = Topo, 1.5 = Wolken-Overlay, 2 = Daten, 3 = Isobaren/CIN, 4 = Grenzen, 5 = Städte, 6 = Zahlen, 10 = Wasserzeichen/Header
+        
     if is_satellite_active:
         sat_img = get_satellite_bg(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
         if sat_img is not None:
             ax.imshow(sat_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=0)
-        
-    if is_categorical or is_discrete:
-        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='max' if not is_categorical else 'neither', alpha=0.9 if is_satellite_active else 0.95, zorder=1)
+
+    if overlays.get('topo'):
+        t_lons, t_lats, t_data = get_topography(model_type)
+        if t_data is not None:
+            topo = ax.contour(t_lons, t_lats, t_data, levels=np.arange(250, 4000, 250), colors=design['text_color'], alpha=0.25, linewidths=0.6, zorder=1)
+            
+    # Das dynamische Wolken-Overlay HINTER dem Signifikanten Wetter
+    if overlays.get('clouds') and overlays.get('extra_data') is not None and legend_title == "Signifikantes Wetter":
+        cloud_cmap = mcolors.LinearSegmentedColormap.from_list("clouds", ["#ffffff00", "#ffffff"])
+        ax.contourf(lons, lats, overlays['extra_data'], levels=np.linspace(10, 100, 15), cmap=cloud_cmap, alpha=0.75, zorder=1.5)
+
+    if is_categorical:
+        # pcolormesh statt contourf = keine Treppeneffekte und Farbvermischungen bei Wetterkategorien
+        karte = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, alpha=0.9 if is_satellite_active else 0.95, shading='nearest', zorder=2)
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
-        if is_categorical:
-            cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
+        cbar.ax.set_xticklabels([SIG_WETTER_LABELS.get(int(v), str(v)) for v in levels], rotation=45, ha='right', fontsize=8)
+    elif is_discrete:
+        karte = ax.contourf(lons, lats, data, levels=bounds, cmap=cmap, norm=norm, extend='max', alpha=0.9 if is_satellite_active else 0.95, zorder=2)
+        cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=levels, aspect=40)
     else:
-        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='max' if is_satellite_active else 'both', alpha=0.9 if is_satellite_active else 0.95, zorder=1)
+        karte = ax.contourf(lons, lats, data, levels=contour_levels, cmap=cmap, extend='max' if is_satellite_active else 'both', alpha=0.9 if is_satellite_active else 0.95, zorder=2)
         tick_step = int(design.get('cbar_step', 1))
         visible_ticks = levels[::tick_step]
         cbar = fig.colorbar(karte, ax=ax, orientation='horizontal', fraction=0.04, pad=0.03, ticks=visible_ticks, aspect=40)
@@ -454,8 +485,8 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     for label in cbar.ax.get_xticklabels(): label.set_fontfamily(design.get('font_family', 'sans-serif'))
     
     line_w = float(design.get('line_width', 0.8))
-    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w, alpha=float(design.get('border_alpha', 0.4)), zorder=2)
-    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w + 0.4, alpha=float(design.get('border_alpha', 0.4)), zorder=2)
+    world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w, alpha=float(design.get('border_alpha', 0.4)), zorder=4)
+    bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w + 0.4, alpha=float(design.get('border_alpha', 0.4)), zorder=4)
 
     if overlays.get('extra_data') is not None and "CIN" in legend_title:
         ax.contourf(lons, lats, overlays['extra_data'], levels=[50, 100000], hatches=['//'], colors='none', edgecolors='#00BFFF', alpha=0.6, zorder=3)
@@ -464,20 +495,15 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         iso = ax.contour(lons, lats, overlays['pmsl_data'], levels=np.arange(900, 1100, 5), colors=design['text_color'], linewidths=1.0, alpha=0.6, zorder=3)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors=design['text_color'])
 
-    if overlays.get('topo'):
-        t_lons, t_lats, t_data = get_topography(model_type)
-        if t_data is not None:
-            topo = ax.contour(t_lons, t_lats, t_data, levels=np.arange(250, 4000, 250), colors=design['text_color'], alpha=0.25, linewidths=0.6, zorder=1)
-
     if overlays.get('cities') and region == "Deutschland":
         c_lons = [coords[0] for coords in GERMAN_CITIES.values()]
         c_lats = [coords[1] for coords in GERMAN_CITIES.values()]
         c_names = list(GERMAN_CITIES.keys())
-        ax.plot(c_lons, c_lats, 'o', color=design['text_color'], markersize=3, alpha=0.8, zorder=4)
+        ax.plot(c_lons, c_lats, 'o', color=design['text_color'], markersize=3, alpha=0.8, zorder=5)
         for lon_c, lat_c, name in zip(c_lons, c_lats, c_names):
             ax.text(lon_c + 0.08, lat_c + 0.08, name, color=design['text_color'], fontsize=8, fontweight='bold',
                     fontfamily=design.get('font_family', 'sans-serif'),
-                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])], zorder=4)
+                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])], zorder=5)
 
     if overlays.get('numbers') and not is_categorical:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
@@ -503,7 +529,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
             txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
             ax.text(lon_val, lat_val, txt, fontsize=5, fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
                     color=design.get('number_color', '#000000'), ha='center', va='center', 
-                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))], zorder=5)
+                    path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))], zorder=6)
 
     if design.get('watermark'):
         ax.text(0.5, 0.02, design['watermark'], transform=ax.transAxes, color=design['text_color'], 
@@ -530,7 +556,7 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
+    with st.popover(f"🌍 Modell: {st.session_state.model_choice}"):
         idx_m = ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
         st.radio("Modell", ["ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
     if st.session_state.m_radio != st.session_state.model_choice:
@@ -542,14 +568,15 @@ with tab_main:
     run_label = st.selectbox("Modelllauf:", list(available_runs.keys()))
     run_time = available_runs[run_label]
     
-    param_list = ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)"]
+    # NEU: Gesamtbewölkung (%) wurde als Parameter integriert
+    param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)"]
     if "D2" in model_choice:
         param_list.extend(["Signifikantes Wetter", "Scherung 0-1 km", "Scherung 0-6 km", "Potentielle Hagelgröße"])
 
     if st.session_state.param_choice not in param_list:
         st.session_state.param_choice = param_list[0]
 
-    with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", width="stretch"):
+    with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}"):
         idx_p = param_list.index(st.session_state.param_choice)
         st.radio("Parameter", param_list, index=idx_p, key="p_radio", label_visibility="collapsed")
     if st.session_state.p_radio != st.session_state.param_choice:
@@ -565,7 +592,7 @@ with tab_main:
     if "D2" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
-    with st.popover(f"📍 Region: {st.session_state.region_choice}", width="stretch"):
+    with st.popover(f"📍 Region: {st.session_state.region_choice}"):
         idx_r = region_options.index(st.session_state.region_choice)
         st.radio("Region", region_options, index=idx_r, key="r_radio", label_visibility="collapsed")
     if st.session_state.r_radio != st.session_state.region_choice:
@@ -587,6 +614,11 @@ with tab_overlays:
     show_satellite = False
     if region_choice == "Deutschland" and param_choice in ["Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_satellite = st.toggle("🛰️ Satellitenbild-Hintergrund", value=False)
+        
+    # NEU: Wolkenschalter für das Signifikante Wetter
+    show_clouds = False
+    if param_choice == "Signifikantes Wetter":
+        show_clouds = st.toggle("☁️ Gesamtbewölkung (als Hintergrund)", value=False)
 
 with tab_design:
     st.subheader("🖥️ Basis-Themes")
@@ -614,7 +646,9 @@ with tab_design:
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
-    if st.button("💾 Design & Wasserzeichen Speichern", width="stretch"): save_design_config(st.session_state.design)
+    
+    # NEU: Breite "stretch" statt deprecated "use_column_width"
+    if st.button("💾 Design & Wasserzeichen Speichern", type="primary", use_container_width=True): save_design_config(st.session_state.design)
 
     st.divider()
     st.subheader("🔢 Zahlen-Design")
@@ -649,9 +683,9 @@ with tab_design:
     st.session_state.config[param_choice] = new_config
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        if st.button("➕ Neu", width="stretch"): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
+        if st.button("➕ Neu", use_container_width=True): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
     with col_btn2:
-        if st.button("💾 Skala Speichern", width="stretch"): save_param_config(param_choice, st.session_state.config[param_choice])
+        if st.button("💾 Skala Speichern", use_container_width=True): save_param_config(param_choice, st.session_state.config[param_choice])
         
     st.divider()
     st.subheader("📥 Gespeicherte Skala laden")
@@ -659,7 +693,7 @@ with tab_design:
     if cloud_files:
         selected_file = st.selectbox("Cloud-Dateien:", ["-- Wählen --"] + cloud_files, label_visibility="collapsed")
         if selected_file != "-- Wählen --":
-            if st.button("Laden & Anwenden", width="stretch"):
+            if st.button("Laden & Anwenden", use_container_width=True):
                 try:
                     g = get_github_client()
                     repo = g.get_repo(st.secrets["GITHUB_REPO"])
@@ -688,17 +722,18 @@ with tab_map:
     chosen_f_hour = int((selected_datetime - start_time_local).total_seconds() / 3600)
     st.session_state.f_hour = chosen_f_hour
 
-    config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers) + str(show_satellite))
+    # Cache-Key angepasst um Bewölkungs-Overlay zu inkludieren
+    config_hash = hash(str(st.session_state.config[param_choice]) + str(st.session_state.design) + str(show_cities) + str(show_topo) + str(show_numbers) + str(show_satellite) + str(show_clouds))
     cache_key = f"{model_choice}_{run_label}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
     if cache_key in st.session_state.map_cache:
-        st.image(st.session_state.map_cache[cache_key]["image"], width="stretch")
+        st.image(st.session_state.map_cache[cache_key]["image"], use_container_width=True)
         if st.session_state.map_cache[cache_key].get("extremes"):
-            st.info(f"**Extremwerte (Ausschnitt Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
+            st.info(f"**Extremwerte (Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
     else:
-        if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary", width="stretch"):
+        if st.button(f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen", type="primary", use_container_width=True):
             with st.spinner("Lade GRIB-Daten und rendere Karte..."):
-                overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo, "satellite": show_satellite}
+                overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "topo": show_topo, "satellite": show_satellite, "clouds": show_clouds}
                 lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, chosen_f_hour, param_choice, model_choice, overlays_dict)
                 
                 if lons is not None:
@@ -732,7 +767,7 @@ with tab_ens:
     om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "ICON-D2-EPS (DWD)": "icon_d2_ensemble", "GFS-ENS (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
     om_param_map = {"Temperatur (2m)": "temperature_2m", "850 hPa Temp.": "temperature_850hPa", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
     
-    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", width="stretch"):
+    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", use_container_width=True):
         with st.spinner(f"Lade alle Modell-Mitglieder für {ens_city}..."):
             lon_c, lat_c = GERMAN_CITIES[ens_city]
             ens_data = fetch_ensemble_data(lat_c, lon_c, om_param_map[ens_param], om_model_map[ens_model])
