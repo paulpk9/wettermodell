@@ -27,7 +27,6 @@ st.markdown("""
         html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
         img { border-radius: 16px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4); transition: all 0.3s ease; }
         
-        /* Modernes Glassmorphism Header-Design */
         .glass-banner {
             background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.02) 100%);
             backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
@@ -36,10 +35,8 @@ st.markdown("""
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); letter-spacing: 0.5px;
         }
         
-        /* Stylische Slider und saubere Inputs */
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
         [data-testid="stColorPicker"] input { display: none !important; }
-        .stPopover { border-radius: 12px !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -89,6 +86,7 @@ if "design" not in st.session_state: st.session_state.design = load_design_confi
 if "model_choice" not in st.session_state: st.session_state.model_choice = "ICON-D2 (2.2km)"
 if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
 if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
+if "eps_choice" not in st.session_state: st.session_state.eps_choice = "Ensemble-Mittel"
 
 SIG_WETTER_LABELS = {
     1: "Nebel", 2: "Regen (leicht)", 3: "Regen (mäßig)", 4: "Regen (stark)",
@@ -109,7 +107,6 @@ DEFAULT_CONFIGS = {
     "CAPE & CIN (Deckel)": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}],
     "Scherung 0-1 km": [{"value": 0.0, "color": "#ffffff"}, {"value": 15.0, "color": "#ffffcc"}, {"value": 30.0, "color": "#fd8d3c"}, {"value": 45.0, "color": "#e31a1c"}, {"value": 60.0, "color": "#800026"}],
     "Scherung 0-6 km": [{"value": 0.0, "color": "#ffffff"}, {"value": 20.0, "color": "#ffffcc"}, {"value": 40.0, "color": "#fd8d3c"}, {"value": 60.0, "color": "#e31a1c"}, {"value": 80.0, "color": "#800026"}],
-    "Simulierte Hagelgröße": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 2.0, "color": "#1f78b4"}, {"value": 4.0, "color": "#33a02c"}, {"value": 6.0, "color": "#e31a1c"}],
     "Radarreflektivität (dBZ)": [{"value": 0.0, "color": "#ffffff"}, {"value": 15.0, "color": "#a6cee3"}, {"value": 30.0, "color": "#1f78b4"}, {"value": 45.0, "color": "#fd8d3c"}, {"value": 55.0, "color": "#e31a1c"}, {"value": 65.0, "color": "#800026"}],
     "Blitzrate (LPI)": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#ffffcc"}, {"value": 5.0, "color": "#fd8d3c"}, {"value": 10.0, "color": "#e31a1c"}, {"value": 20.0, "color": "#800026"}],
     "Chaser Target-Index": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#ffffcc"}, {"value": 3.0, "color": "#fd8d3c"}, {"value": 6.0, "color": "#e31a1c"}, {"value": 10.0, "color": "#800026"}],
@@ -177,7 +174,7 @@ def save_param_config(param_name, config_list):
                 repo.update_file(filepath, f"Update config for {param_name}", json.dumps(clean_list, indent=4), file.sha)
             except: 
                 repo.create_file(filepath, f"Create config for {param_name}", json.dumps(clean_list, indent=4))
-            st.success(f"Farbskala erfolgreich gespeichert!")
+            st.success(f"Farbskala erfolgreich in {filepath} gespeichert!")
         except Exception as e: st.error(f"Fehler beim Speichern: {e}")
 
 @st.cache_data
@@ -187,6 +184,16 @@ def load_borders():
     with tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f1, tempfile.NamedTemporaryFile(suffix=".geojson", mode="w+", delete=False) as f2:
         f1.write(w_r); f1_name = f1.name; f2.write(bl_r); f2_name = f2.name
     return gpd.read_file(f1_name), gpd.read_file(f2_name)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_dwd_radar(lon_min, lon_max, lat_min, lat_max):
+    url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={lon_min},{lat_min},{lon_max},{lat_max}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            return np.array(Image.open(io.BytesIO(resp.content)))
+    except: pass
+    return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ensemble_data(lat, lon, param, model):
@@ -216,7 +223,6 @@ def get_available_runs(model_name):
 def download_and_extract(url, is_bz2=False, param_name=None, eps_member=None):
     if not url: return None, None, None
     try:
-        # Stream=True verhindert Abbruch bei DWD-Sperren von Head-Requests
         resp = requests.get(url, headers={"User-Agent": "Mozilla"}, stream=True, timeout=10)
         if resp.status_code != 200: return None, None, None
         
@@ -275,8 +281,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
         "Radarreflektivität (dBZ)": ("dbz_cmax", "dbz_cmax", None), "Blitzrate (LPI)": ("lpi_max", "lpi_max", None),
         "U-Wind 10m": ("u_10m", "u_10m", None), "V-Wind 10m": ("v_10m", "v_10m", None),
         "U-Wind 850hPa": ("u", "u", "850"), "V-Wind 850hPa": ("v", "v", "850"),
-        "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500"),
-        "Simulierte Hagelgröße": ("mxhail", "mxhail", None)
+        "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500")
     }
         
     if param_name not in dm: return None, None, None
@@ -291,11 +296,11 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
             urls_to_try.extend([base + prefix + f"{var.upper()}.grib2.bz2", base + prefix + f"{var}.grib2.bz2"])
         else:
             prefix = f"{m_str}_germany_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_"
-            vars_try = [var, f"2d_{var}", var.replace("2d_", "")]
-            if fld == "mxhail" or var == "mxhail":
-                vars_try.extend(["mxhail", "2d_mxhail", "dzhail_mx", "2d_dzhail_mx"])
-            for v in vars_try:
-                urls_to_try.append(base + prefix + f"{v}.grib2.bz2")
+            urls_to_try.extend([
+                base + prefix + f"{var}.grib2.bz2",
+                base + prefix + f"2d_{var}.grib2.bz2",
+                base + prefix + f"{var.replace('2d_', '')}.grib2.bz2"
+            ])
     elif "EU" in model:
         base = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/"
         if lvl:
@@ -391,15 +396,16 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Niederschlagsrate (mm/h)":
         if forecast_hour > 0:
             res_v1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)", eps_choice)
-            v1 = res_v1[2]
-            if isinstance(v1, tuple): v1 = v1[0]
-            vals = np.clip(vals - v1, 0, None) if v1 is not None else vals
-        else: vals = np.zeros_like(vals)
+            if res_v1[2] is not None:
+                v1 = res_v1[2]
+                if isinstance(v1, tuple): v1 = v1[0]
+                vals = np.clip(vals - v1, 0, None)
+            else:
+                vals = np.zeros_like(vals)
+        else: 
+            vals = np.zeros_like(vals)
         title = "Regenrate in mm/h"
     elif "Geopot" in param_name: vals = vals / 9.80665 / 10.0; title = "Geopotential (gpdm)"
-    elif param_name == "Simulierte Hagelgröße": 
-        # Hagel roh ist meist Meter, Umrechnung in cm
-        vals = vals * 100.0; title = "Hagelgröße (cm)"
     elif param_name == "MLCAPE": title = "CAPE (J/kg)"
     elif param_name == "CIN": title = "CIN (J/kg)"
     elif param_name == "Signifikantes Wetter":
@@ -424,30 +430,29 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
 
 # --- MAP RENDERER ---
 def get_scientific_cmap(param_name):
-    # Automatische Zuweisung fehlerfreier, wissenschaftlicher Farbskalen
     if "Temp" in param_name: return "turbo"
     if "Wind" in param_name or "Scherung" in param_name: return "plasma"
     if "Niederschlag" in param_name or "Regen" in param_name or "PWAT" in param_name: return "viridis_r"
     if "CAPE" in param_name or "LPI" in param_name or "SCP" in param_name or "Chaser" in param_name: return "magma_r"
     if "Bewölkung" in param_name: return "Greys_r"
     if "Radar" in param_name: return "nipy_spectral"
-    if "Hagel" in param_name: return "inferno_r"
     return "turbo"
 
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, overlays, design):
     world, bundeslaender = load_borders()
-    
-    levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
-    colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
-    min_v, max_v = min(levels), max(levels)
-    if max_v == min_v: max_v += 1 
     
     is_categorical = (legend_title == "Signifikantes Wetter")
     is_discrete = design.get('discrete_colors', False)
     is_live_radar = (model_type == "Live-Radar (DWD)")
     use_sci_cmap = design.get('scientific_cmap', False)
     
+    # FIX: Min() Error[span_7](start_span)[span_7](end_span) bei Live-Radar wird komplett abgefangen!
     if not is_live_radar:
+        levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
+        colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
+        min_v, max_v = min(levels), max(levels)
+        if max_v == min_v: max_v += 1 
+        
         if is_categorical:
             cmap = mcolors.ListedColormap(colors)
             cmap.set_bad('none')
@@ -470,7 +475,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     fig.patch.set_facecolor(design['bg_color'])
     ax.set_facecolor(design['bg_color'])
     
-    # NEU: Karten-Umrandung
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
@@ -482,18 +486,10 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_xlim(REGIONS[region][0], REGIONS[region][1])
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
 
-    # Z-ORDER SYSTEM:
-    # 0=Radar, 1.5=Wolken, 2=Daten, 3=Isobaren, 4=Grenzen, 5=Städte, 6=Zahlen
     if is_live_radar:
-        # Direkter Abruf des DWD Live-Radars (RX) für exakt diese Bounding Box
-        import urllib.request
-        bbox_str = f"{REGIONS[region][0]},{REGIONS[region][2]},{REGIONS[region][1]},{REGIONS[region][3]}"
-        url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={bbox_str}"
-        try:
-            req = urllib.request.urlopen(url)
-            radar_img = plt.imread(req, format='png')
+        radar_img = get_dwd_radar(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
+        if radar_img is not None:
             ax.imshow(radar_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=2)
-        except: pass
     else:
         if overlays.get('clouds') and overlays.get('extra_data') is not None and legend_title == "Signifikantes Wetter":
             cloud_cmap = mcolors.LinearSegmentedColormap.from_list("clouds", ["#ffffff00", "#ffffff"])
@@ -534,7 +530,6 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])], zorder=5)
 
-    # NEU: Smart Zoom für Zahlenwerte! Erkennt kleine Bundesländer und passt die Größe/Dichte an
     if overlays.get('numbers') and not is_categorical and not is_live_radar:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         try: dy_km = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
@@ -548,7 +543,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         
         mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
         
-        if legend_title == "Regenrate in mm/h" or legend_title == "Niederschlag in mm" or "Hagel" in legend_title:
+        if legend_title == "Regenrate in mm/h" or legend_title == "Niederschlag in mm":
             size_px = max(3, int((target_km/1.5) / dy_km))
             local_max = ndimage.maximum_filter(data, size=size_px) == data
             valid_mask = mask & local_max & (data >= 0.1)
@@ -559,9 +554,9 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
             valid_mask = mask & grid_mask
         
         for lon_val, lat_val, val in zip(lons[valid_mask], lats[valid_mask], data[valid_mask]):
-            if ("Niederschlag" in legend_title or "Regen" in legend_title or "Hagel" in legend_title) and val < 0.1: continue
+            if ("Niederschlag" in legend_title or "Regen" in legend_title) and val < 0.1: continue
             if "CAPE" in legend_title and val < 50: continue
-            txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title or "Hagel" in legend_title) else f"{val:.0f}"
+            txt = f"{val:.1f}" if ("Niederschlag" in legend_title or "Regen" in legend_title) else f"{val:.0f}"
             ax.text(lon_val, lat_val, txt, fontsize=dyn_fontsize, fontfamily=design.get('font_family', 'sans-serif'), fontweight='bold', 
                     color=design.get('number_color', '#000000'), ha='center', va='center', 
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design.get('number_outline', '#FFFFFF'))], zorder=6)
@@ -590,13 +585,10 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
-        idx_m = ["Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"].index(st.session_state.model_choice)
-        st.radio("Modell", ["Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"], index=idx_m, key="m_radio", label_visibility="collapsed")
-    if st.session_state.m_radio != st.session_state.model_choice:
-        st.session_state.model_choice = st.session_state.m_radio
-        st.rerun()
-
+    # Dropdown-Fixes (Statt fehleranfälligem st.popover)
+    model_options = ["Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"]
+    st.session_state.model_choice = st.selectbox("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 1)
+    
     model_choice = st.session_state.model_choice
     
     if "Live-Radar" not in model_choice:
@@ -609,20 +601,15 @@ with tab_main:
             eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21)]
             eps_choice = st.selectbox("Ensemble-Mitglied:", eps_members, index=0)
         
+        # Hagel wurde restlos aus der Liste entfernt
         param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)"]
         if "D2" in model_choice:
-            param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index", "Simulierte Hagelgröße"])
+            param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"])
 
         if st.session_state.param_choice not in param_list:
             st.session_state.param_choice = param_list[0]
 
-        with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", width="stretch"):
-            idx_p = param_list.index(st.session_state.param_choice)
-            st.radio("Parameter", param_list, index=idx_p, key="p_radio", label_visibility="collapsed")
-        if st.session_state.p_radio != st.session_state.param_choice:
-            st.session_state.param_choice = st.session_state.p_radio
-            st.rerun()
-            
+        st.session_state.param_choice = st.selectbox("🌡️ Parameter:", param_list, index=param_list.index(st.session_state.param_choice))
         param_choice = st.session_state.param_choice
         
         if param_choice not in st.session_state.config: 
@@ -637,13 +624,7 @@ with tab_main:
     if "D2" in model_choice or "Live" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
-    with st.popover(f"📍 Region: {st.session_state.region_choice}", width="stretch"):
-        idx_r = region_options.index(st.session_state.region_choice)
-        st.radio("Region", region_options, index=idx_r, key="r_radio", label_visibility="collapsed")
-    if st.session_state.r_radio != st.session_state.region_choice:
-        st.session_state.region_choice = st.session_state.r_radio
-        st.rerun()
-        
+    st.session_state.region_choice = st.selectbox("📍 Region:", region_options, index=region_options.index(st.session_state.region_choice))
     region_choice = st.session_state.region_choice
     
     run_to_run = False
@@ -656,7 +637,7 @@ with tab_overlays:
     show_pmsl = st.toggle("💨 Isobaren (Luftdruck)", value=True) if param_choice == "850 hPa Temp." else False
     
     show_numbers = False
-    if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "Simulierte Hagelgröße"]:
+    if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
         
     show_clouds = False
@@ -674,7 +655,6 @@ with tab_design:
         st.session_state['last_theme'] = theme_choice
         st.rerun()
 
-    # NEU: Wissenschaftliche Farbskalen Schalter!
     st.session_state.design['scientific_cmap'] = st.toggle("🧪 Wissenschaftliche Farbskalen (Modern)", value=st.session_state.design.get('scientific_cmap', False))
 
     st.divider()
@@ -692,6 +672,8 @@ with tab_design:
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
+    
+    # FIX: Alle Warnungen im Log wurden durch width="stretch" bereinigt[span_8](start_span)[span_8](end_span)
     if st.button("💾 Design & Wasserzeichen Speichern", type="primary", width="stretch"): save_design_config(st.session_state.design)
 
     if "Live-Radar" not in model_choice:
@@ -835,6 +817,48 @@ with tab_map:
                             st.rerun() 
                         else:
                             st.error(f"Ein Datensatz für diesen Parameter (+{chosen_f_hour}h) ist auf den Servern für diesen Modelllauf noch nicht verfügbar.")
+
+    # NEU: Vorlade-Funktion (Caching) mit Fortschrittsleiste
+    if not "Live" in model_choice:
+        st.divider()
+        if st.button("🔄 Alle Karten vorladen (Zwischenspeicher)", width="stretch"):
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            
+            hours_to_load = list(range(0, max_h + 1, step_h))
+            total_hours = len(hours_to_load)
+            
+            overlays_dict = {"pmsl": show_pmsl, "numbers": show_numbers, "cities": show_cities, "clouds": show_clouds, "eps_choice": eps_choice}
+            
+            for i, fh in enumerate(hours_to_load):
+                status_text.text(f"Lade Karte +{fh}h ({i+1}/{total_hours}) in den Cache...")
+                
+                c_hash = hash(str(st.session_state.config.get(param_choice)) + str(st.session_state.design) + str(show_cities) + str(show_clouds) + str(show_numbers) + (str(eps_choice) if not "Live" in model_choice else "") + str(run_to_run))
+                c_key = f"{model_choice}_{run_time.strftime('%Y%m%d%H')}_{param_choice}_{region_choice}_{fh}_{show_pmsl}_{c_hash}"
+                
+                if c_key not in st.session_state.map_cache:
+                    lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, fh, param_choice, model_choice, overlays_dict, eps_choice)
+                    if lons is not None:
+                        extremes_txt = None
+                        if region_choice == "Deutschland" and param_choice != "Signifikantes Wetter":
+                            xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
+                            mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
+                            if np.any(mask):
+                                unit = title.split("in ")[-1] if "in " in title else title.split("(")[-1].replace(")", "")
+                                extremes_txt = f"Min: {np.nanmin(data[mask]):.1f} {unit} | Max: {np.nanmax(data[mask]):.1f} {unit}"
+                        
+                        overlays_dict_pass = overlays_dict.copy()
+                        overlays_dict_pass['pmsl_data'] = pmsl
+                        overlays_dict_pass['extra_data'] = extra_overlay
+                        
+                        t_str = (start_time_local + timedelta(hours=fh)).strftime('%d.%m. %H:00')
+                        img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{fh}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict_pass, st.session_state.design)
+                        
+                        st.session_state.map_cache[c_key] = {"image": img_bytes, "extremes": extremes_txt}
+                
+                progress_bar.progress((i + 1) / total_hours)
+                
+            status_text.text("✅ Alle Karten erfolgreich geladen! Du kannst nun verzögerungsfrei durchscrollen.")
 
 with tab_ens:
     st.markdown("### 📈 Profi-Ensemble Prognose (Punktabfrage)")
