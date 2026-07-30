@@ -1,10 +1,10 @@
 {
     "bg_color": "#171c2e",
     "title_bg": "#101010",
-    "text_color": "#000000",
+    "text_color": "#ffffff",
     "border_color": "#FFFFFF",
     "border_alpha": 0.8,
-    "font_family": "monospace",
+    "font_family": "sans-serif",
     "cbar_step": 2,
     "number_color": "#ffffff",
     "number_outline": "#000000",
