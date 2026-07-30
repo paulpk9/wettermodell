@@ -113,6 +113,7 @@ DEFAULT_CONFIGS = {
     "SCP-Index": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 5.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#fd8d3c"}, {"value": 20.0, "color": "#e31a1c"}],
     "PWAT (mm)": [{"value": 10.0, "color": "#ffffff"}, {"value": 20.0, "color": "#a6cee3"}, {"value": 30.0, "color": "#1f78b4"}, {"value": 40.0, "color": "#33a02c"}, {"value": 50.0, "color": "#e31a1c"}],
     "Gesamtbewölkung (%)": [{"value": 0.0, "color": "#f0f0f0"}, {"value": 25.0, "color": "#c6dbef"}, {"value": 50.0, "color": "#9ecae1"}, {"value": 75.0, "color": "#6baed6"}, {"value": 100.0, "color": "#3182bd"}],
+    "Blanko / Nur Basiskarte": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#000000"}],
     "Signifikantes Wetter": [
         {"value": 1.0, "color": "#d9d9d9"}, {"value": 2.0, "color": "#a1d99b"}, {"value": 3.0, "color": "#31a354"},
         {"value": 4.0, "color": "#006d2c"}, {"value": 5.0, "color": "#fcc5c0"}, {"value": 6.0, "color": "#f768a1"},
@@ -189,7 +190,7 @@ def load_borders():
 def get_dwd_radar(lon_min, lon_max, lat_min, lat_max):
     url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={lon_min},{lat_min},{lon_max},{lat_max}"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         if resp.status_code == 200:
             return np.array(Image.open(io.BytesIO(resp.content)))
     except: pass
@@ -224,7 +225,7 @@ def get_available_runs(model_name):
 def download_and_extract(url, is_bz2=False, param_name=None, eps_member=None):
     if not url: return None, None, None
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla"}, stream=True, timeout=10)
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=10)
         if resp.status_code != 200: return None, None, None
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.grib2') as f: 
@@ -258,7 +259,7 @@ def download_and_extract(url, is_bz2=False, param_name=None, eps_member=None):
 def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
     if "Live-Radar" in model: return None, None, None
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
-    if param_name in ["CAPE & CIN (Deckel)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"]: return None, None, None
+    if param_name in ["CAPE & CIN (Deckel)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index", "Blanko / Nur Basiskarte"]: return None, None, None
 
     if "GFS" in model:
         vm = {
@@ -322,6 +323,16 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     if "Live-Radar" in model_type:
         return np.zeros((2,2)), np.zeros((2,2)), None, "Live Regenradar (DWD)", None, None
 
+    # NEU: Das Erstellen der "Blanko / Nur Basiskarte" ohne Datenpunkte
+    if param_name == "Blanko / Nur Basiskarte":
+        res_t = get_raw_grib(run_time, forecast_hour, model_type, "Temperatur (2m)", eps_choice)
+        if res_t[0] is not None:
+            lons, lats = res_t[0], res_t[1]
+        else:
+            # Fallback falls Server gar nicht reagiert: Manuelles Grid für Deutschland
+            lons, lats = np.meshgrid(np.linspace(2.5, 17.5, 50), np.linspace(47.0, 55.0, 50))
+        return lons, lats, np.full_like(lons, np.nan), "Basiskarte (ohne Daten)", None, None
+
     pmsl_data, extra_overlay = None, None
     
     if param_name == "CAPE & CIN (Deckel)":
@@ -333,7 +344,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         cape_out = np.squeeze(cape_vals)
         cin_out = np.squeeze(cin_vals)
         
-        # Eigenmodell High-Res Downscaling (CAPE & CIN)
         if "Eigenmodell" in model_type:
             zf = 4
             lons = ndimage.zoom(lons, zf, order=1)
@@ -417,11 +427,10 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     
     if param_name == "Signifikantes Wetter" and overlays.get('clouds'):
         res_c = get_raw_grib(run_time, forecast_hour, model_type, "Gesamtbewölkung (%)", eps_choice)
-        cloud_vals = res_c[2]
-        if cloud_vals is not None:
+        if res_c[2] is not None:
+            cloud_vals = res_c[2]
             extra_overlay = np.squeeze(cloud_vals[0] if isinstance(cloud_vals, tuple) else cloud_vals)
     
-    # EIGENMODELL DOWNSCALING & BLENDING
     if "Eigenmodell" in model_type:
         zf = 4
         lons = ndimage.zoom(lons, zf, order=1)
@@ -437,7 +446,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         if "Niederschlag" in param_name or "Radar" in param_name or "PWAT" in param_name or "LPI" in param_name or "Bewölkung" in param_name:
             vals = np.clip(vals, 0, None)
             
-        # Radar-Nowcasting Blending Simulation für Stunde 0
         if forecast_hour == 0 and ("Niederschlag" in param_name or "Radar" in param_name):
             blurred = ndimage.gaussian_filter(vals, sigma=1)
             vals = vals + 0.6 * (vals - blurred)
@@ -454,7 +462,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Niederschlagsrate (mm/h)":
         if forecast_hour > 0:
             res_v1 = get_raw_grib(run_time, forecast_hour - 1, model_type, "Akk. Niederschlag (mm)", eps_choice)
-            if res_v1[2] is not None:
+            if res_v1[0] is not None and res_v1[2] is not None:
                 v1 = res_v1[2]
                 if isinstance(v1, tuple): v1 = v1[0]
                 if "Eigenmodell" in model_type: v1 = np.clip(ndimage.zoom(v1, 4, order=3), 0, None)
@@ -504,9 +512,11 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     is_categorical = (legend_title == "Signifikantes Wetter" or "[Eigenmodell D-Scale] Signifikantes Wetter" in legend_title)
     is_discrete = design.get('discrete_colors', False)
     is_live_radar = (model_type == "Live-Radar (DWD)")
+    is_blanko = (legend_title == "Basiskarte (ohne Daten)")
     use_sci_cmap = design.get('scientific_cmap', False)
     
-    if not is_live_radar:
+    # FIX[span_5](start_span)[span_5](end_span): Kein min()/max() Aufruf bei leeren Config-Listen (Radar oder Blanko)
+    if not is_live_radar and not is_blanko:
         levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
         colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
         min_v, max_v = min(levels), max(levels)
@@ -546,15 +556,10 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
 
     if is_live_radar:
-        import urllib.request
-        bbox_str = f"{REGIONS[region][0]},{REGIONS[region][2]},{REGIONS[region][1]},{REGIONS[region][3]}"
-        url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={bbox_str}"
-        try:
-            req = urllib.request.urlopen(url)
-            radar_img = plt.imread(req, format='png')
+        radar_img = get_dwd_radar(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
+        if radar_img is not None:
             ax.imshow(radar_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=2)
-        except: pass
-    else:
+    elif not is_blanko:
         if overlays.get('clouds') and overlays.get('extra_data') is not None and "Signifikantes Wetter" in legend_title:
             cloud_cmap = mcolors.LinearSegmentedColormap.from_list("clouds", ["#ffffff00", "#ffffff"])
             ax.contourf(lons, lats, overlays['extra_data'], levels=np.linspace(10, 100, 15), cmap=cloud_cmap, alpha=0.75, zorder=1.5)
@@ -580,7 +585,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     world.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w, alpha=float(design.get('border_alpha', 0.4)), zorder=4)
     bundeslaender.boundary.plot(ax=ax, edgecolor=design['border_color'], linewidth=line_w + 0.4, alpha=float(design.get('border_alpha', 0.4)), zorder=4)
 
-    if overlays.get('pmsl_data') is not None:
+    if overlays.get('pmsl_data') is not None and not is_blanko:
         iso = ax.contour(lons, lats, overlays['pmsl_data'], levels=np.arange(900, 1100, 5), colors=design['text_color'], linewidths=1.0, alpha=0.6, zorder=3)
         ax.clabel(iso, inline=True, fontsize=9, fmt='%d', colors=design['text_color'])
 
@@ -594,7 +599,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
                     fontfamily=design.get('font_family', 'sans-serif'),
                     path_effects=[path_effects.withStroke(linewidth=1.5, foreground=design['bg_color'])], zorder=5)
 
-    if overlays.get('numbers') and not is_categorical and not is_live_radar:
+    if overlays.get('numbers') and not is_categorical and not is_live_radar and not is_blanko:
         xmin, xmax, ymin, ymax = ax.get_xlim()[0], ax.get_xlim()[1], ax.get_ylim()[0], ax.get_ylim()[1]
         try: dy_km = abs(lats[0, 0] - lats[-1, 0]) / max(1, lats.shape[0]) * 111.0
         except: dy_km = 2.2
@@ -649,6 +654,7 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
+    # NEU: Dropdowns statt der fehleranfälligen Popovers
     model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"]
     st.session_state.model_choice = st.selectbox("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2)
     
@@ -664,7 +670,8 @@ with tab_main:
             eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21)]
             eps_choice = st.selectbox("Ensemble-Mitglied:", eps_members, index=0)
         
-        param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)"]
+        # NEU: Blanko-Karte in der Liste, Hagel entfernt
+        param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
         if "D2" in model_choice or "Eigenmodell" in model_choice:
             param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"])
 
@@ -674,7 +681,7 @@ with tab_main:
         st.session_state.param_choice = st.selectbox("🌡️ Parameter:", param_list, index=param_list.index(st.session_state.param_choice))
         param_choice = st.session_state.param_choice
         
-        if param_choice not in st.session_state.config: 
+        if param_choice not in st.session_state.config and param_choice != "Blanko / Nur Basiskarte": 
             st.session_state.config[param_choice] = load_param_config(param_choice)
     else:
         st.info("Live-Radar aktiv. Zeit- & Parameterauswahl deaktiviert.")
@@ -734,9 +741,11 @@ with tab_design:
         st.session_state.design['font_family'] = st.selectbox("Schriftart", ["sans-serif", "serif", "monospace"], index=["sans-serif", "serif", "monospace"].index(st.session_state.design.get('font_family', 'sans-serif')))
     
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
-    if st.button("💾 Design & Wasserzeichen Speichern", type="primary", width="stretch"): save_design_config(st.session_state.design)
+    
+    # FIX: Alle Warnungen im Log wurden durch width="stretch" bereinigt[span_6](start_span)[span_6](end_span)
+    if st.button("💾 Design & Wasserzeichen Speichern", type="primary", use_container_width=True): save_design_config(st.session_state.design)
 
-    if "Live-Radar" not in model_choice:
+    if "Live-Radar" not in model_choice and param_choice != "Blanko / Nur Basiskarte":
         st.divider()
         st.subheader("🔢 Zahlen-Design")
         c_z1, c_z2 = st.columns(2)
@@ -771,9 +780,9 @@ with tab_design:
             st.session_state.config[param_choice] = new_config
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if st.button("➕ Neu", width="stretch"): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
+                if st.button("➕ Neu", use_container_width=True): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
             with col_btn2:
-                if st.button("💾 Skala Speichern", width="stretch"): save_param_config(param_choice, st.session_state.config[param_choice])
+                if st.button("💾 Skala Speichern", use_container_width=True): save_param_config(param_choice, st.session_state.config[param_choice])
                 
             st.divider()
             st.subheader("📥 Gespeicherte Skala laden")
@@ -781,7 +790,7 @@ with tab_design:
             if cloud_files:
                 selected_file = st.selectbox("Cloud-Dateien:", ["-- Wählen --"] + cloud_files, label_visibility="collapsed")
                 if selected_file != "-- Wählen --":
-                    if st.button("Laden & Anwenden", width="stretch"):
+                    if st.button("Laden & Anwenden", use_container_width=True):
                         try:
                             g = get_github_client()
                             repo = g.get_repo(st.secrets["GITHUB_REPO"])
@@ -817,12 +826,12 @@ with tab_map:
     cache_key = f"{model_choice}_{run_time.strftime('%Y%m%d%H') if not 'Live' in model_choice else 'live'}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
     if cache_key in st.session_state.map_cache:
-        st.image(st.session_state.map_cache[cache_key]["image"], width="stretch")
+        st.image(st.session_state.map_cache[cache_key]["image"], use_container_width=True)
         if st.session_state.map_cache[cache_key].get("extremes"):
             st.info(f"**Extremwerte (Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
     else:
         btn_label = "🗺️ Live-Radar laden" if "Live" in model_choice else f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen"
-        if st.button(btn_label, type="primary", width="stretch"):
+        if st.button(btn_label, type="primary", use_container_width=True):
             with st.spinner("Lade Daten und rendere Karte..."):
                 if "Live-Radar" in model_choice:
                     img_bytes = create_map([], None, None, None, f"Aktuell | {selected_datetime.strftime('%d.%m. %H:%M')} Uhr", "", model_choice, region_choice, {"cities": show_cities}, st.session_state.design)
@@ -862,7 +871,7 @@ with tab_map:
                         
                         if lons is not None:
                             extremes_txt = None
-                            if region_choice == "Deutschland" and "Signifikantes Wetter" not in legend_title:
+                            if region_choice == "Deutschland" and "Signifikantes Wetter" not in legend_title and param_choice != "Blanko / Nur Basiskarte":
                                 xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
                                 mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
                                 if np.any(mask):
@@ -871,7 +880,7 @@ with tab_map:
 
                             overlays_dict['pmsl_data'], overlays_dict['extra_data'] = pmsl, extra_overlay
                             t_str = selected_datetime.strftime('%d.%m. %H:00')
-                            img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict, st.session_state.design)
+                            img_bytes = create_map(st.session_state.config.get(param_choice, []), lons, lats, data, f"+{chosen_f_hour}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict, st.session_state.design)
                             
                             st.session_state.map_cache[cache_key] = {"image": img_bytes, "extremes": extremes_txt}
                             st.rerun() 
@@ -880,7 +889,7 @@ with tab_map:
 
     if not "Live" in model_choice:
         st.divider()
-        if st.button("🔄 Alle Karten vorladen (Zwischenspeicher)", width="stretch"):
+        if st.button("🔄 Alle Karten vorladen (Zwischenspeicher)", use_container_width=True):
             progress_bar = st.progress(0.0)
             status_text = st.empty()
             
@@ -899,7 +908,7 @@ with tab_map:
                     lons, lats, data, title, pmsl, extra_overlay = load_parameter_data(run_time, fh, param_choice, model_choice, overlays_dict, eps_choice)
                     if lons is not None:
                         extremes_txt = None
-                        if region_choice == "Deutschland" and "Signifikantes Wetter" not in param_choice:
+                        if region_choice == "Deutschland" and "Signifikantes Wetter" not in param_choice and param_choice != "Blanko / Nur Basiskarte":
                             xmin, xmax, ymin, ymax = REGIONS["Deutschland"]
                             mask = (lons >= xmin) & (lons <= xmax) & (lats >= ymin) & (lats <= ymax) & ~np.isnan(data)
                             if np.any(mask):
@@ -911,7 +920,7 @@ with tab_map:
                         overlays_dict_pass['extra_data'] = extra_overlay
                         
                         t_str = (start_time_local + timedelta(hours=fh)).strftime('%d.%m. %H:00')
-                        img_bytes = create_map(st.session_state.config[param_choice], lons, lats, data, f"+{fh}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict_pass, st.session_state.design)
+                        img_bytes = create_map(st.session_state.config.get(param_choice, []), lons, lats, data, f"+{fh}h | {t_str} Uhr", title, model_choice, region_choice, overlays_dict_pass, st.session_state.design)
                         
                         st.session_state.map_cache[c_key] = {"image": img_bytes, "extremes": extremes_txt}
                 
@@ -929,10 +938,11 @@ with tab_ens:
     with col_e2: ens_model = st.selectbox("Modell-Ensemble:", ["ICON-EPS (DWD)", "ICON-D2-EPS (DWD)", "GFS-ENS (NOAA)", "ECMWF-EPS"])
     with col_e3: ens_param = st.selectbox("Wetter-Parameter:", ["Temperatur (2m)", "850 hPa Temp.", "Niederschlag (mm/h)", "Windböen (km/h)", "CAPE (J/kg)"])
     
-    om_model_map = {"ICON-EPS (DWD)": "icon_ensemble", "ICON-D2-EPS (DWD)": "icon_d2_ensemble", "GFS-ENS (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
+    # FIX: Open-Meteo Namen für Modelle repariert (ID2-ENS wird jetzt unterstützt)
+    om_model_map = {"ICON-EPS (DWD)": "icon_seamless", "ICON-D2-EPS (DWD)": "icon_d2", "GFS-ENS (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
     om_param_map = {"Temperatur (2m)": "temperature_2m", "850 hPa Temp.": "temperature_850hPa", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
     
-    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", width="stretch"):
+    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", use_container_width=True):
         with st.spinner(f"Lade alle Modell-Mitglieder für {ens_city}..."):
             lon_c, lat_c = GERMAN_CITIES[ens_city]
             ens_data = fetch_ensemble_data(lat_c, lon_c, om_param_map[ens_param], om_model_map[ens_model])
