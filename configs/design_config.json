@@ -1,16 +1,16 @@
 {
-    "bg_color": "#0E1117",
-    "title_bg": "#0E1117",
+    "bg_color": "#131a32",
+    "title_bg": "#101010",
     "text_color": "#FFFFFF",
     "border_color": "#FFFFFF",
-    "border_alpha": 0.4,
+    "border_alpha": 0.5,
     "font_family": "monospace",
-    "cbar_step": 2,
+    "cbar_step": 1,
     "number_color": "#ffffff",
     "number_outline": "#000000",
     "title_size": 10,
     "cbar_size": 10,
-    "line_width": 0.8,
+    "line_width": 1.0,
     "watermark": "WarnWetter Ostdeutschland",
     "discrete_colors": false
 }
