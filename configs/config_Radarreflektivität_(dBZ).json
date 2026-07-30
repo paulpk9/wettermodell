@@ -1,0 +1,70 @@
+[
+    {
+        "value": 0.0,
+        "color": "#222222"
+    },
+    {
+        "value": 0.1,
+        "color": "#69bedc"
+    },
+    {
+        "value": 5.0,
+        "color": "#008fdd"
+    },
+    {
+        "value": 10.0,
+        "color": "#0030e4"
+    },
+    {
+        "value": 15.0,
+        "color": "#000883"
+    },
+    {
+        "value": 20.0,
+        "color": "#005305"
+    },
+    {
+        "value": 25.0,
+        "color": "#00c705"
+    },
+    {
+        "value": 30.0,
+        "color": "#b7dc00"
+    },
+    {
+        "value": 35.0,
+        "color": "#e2b200"
+    },
+    {
+        "value": 40.0,
+        "color": "#e35f00"
+    },
+    {
+        "value": 45.0,
+        "color": "#e32300"
+    },
+    {
+        "value": 50.0,
+        "color": "#b10000"
+    },
+    {
+        "value": 55.0,
+        "color": "#790000"
+    },
+    {
+        "value": 59.0,
+        "color": "#400004"
+    },
+    {
+        "value": 60.0,
+        "color": "#ff93f6"
+    },
+    {
+        "value": 65.0,
+        "color": "#a732ae"
+    },
+    {
+        "value": 70.0,
+        "color": "#670072"
+    }
+]
