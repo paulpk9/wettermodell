@@ -324,13 +324,11 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     if "Live-Radar" in model_type:
         return np.zeros((2,2)), np.zeros((2,2)), None, "Live Regenradar (DWD)", None, None
 
-    # NEU: Das Erstellen der "Blanko / Nur Basiskarte" ohne Datenpunkte
     if param_name == "Blanko / Nur Basiskarte":
         res_t = get_raw_grib(run_time, forecast_hour, model_type, "Temperatur (2m)", eps_choice)
         if res_t[0] is not None:
             lons, lats = res_t[0], res_t[1]
         else:
-            # Fallback falls Server gar nicht reagiert: Manuelles Grid für Deutschland
             lons, lats = np.meshgrid(np.linspace(2.5, 17.5, 50), np.linspace(47.0, 55.0, 50))
         return lons, lats, np.full_like(lons, np.nan), "Basiskarte (ohne Daten)", None, None
 
@@ -421,10 +419,19 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
                 cti = np.clip(ndimage.zoom(cti, zf, order=3), 0, None)
             return lons_out, lats_out, cti, "Chaser Target-Index (CTI)", None, None
 
-    lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name, eps_choice)
-    if vals is None: return None, None, None, "", None, None
-    if isinstance(vals, tuple): vals, p_raw = vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
-    vals = np.squeeze(vals)
+    if param_name in ["Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"] and forecast_hour == 0:
+        res_t = get_raw_grib(run_time, forecast_hour, model_type, "Temperatur (2m)", eps_choice)
+        if res_t[0] is None: return None, None, None, "", None, None
+        lons, lats = res_t[0], res_t[1]
+        vals = np.zeros_like(lons)
+    else:
+        res_main = get_raw_grib(run_time, forecast_hour, model_type, param_name, eps_choice)
+        if res_main[0] is None: return None, None, None, "", None, None
+        lons, lats, vals = res_main[0], res_main[1], res_main[2]
+        if isinstance(vals, tuple): 
+            vals, p_raw = vals
+            pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
+        vals = np.squeeze(vals)
     
     if param_name == "Signifikantes Wetter" and overlays.get('clouds'):
         res_c = get_raw_grib(run_time, forecast_hour, model_type, "Gesamtbewölkung (%)", eps_choice)
@@ -516,6 +523,9 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     is_blanko = (legend_title == "Basiskarte (ohne Daten)")
     use_sci_cmap = design.get('scientific_cmap', False)
     
+    if not config_list:
+        config_list = [{"value": 0.0, "color": "#000000"}, {"value": 1.0, "color": "#ffffff"}]
+    
     if not is_live_radar and not is_blanko:
         levels = [c['value'] for c in sorted(config_list, key=lambda x: x['value'])]
         colors = [c['color'] for c in sorted(config_list, key=lambda x: x['value'])]
@@ -556,9 +566,14 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
 
     if is_live_radar:
-        radar_img = get_dwd_radar(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3])
-        if radar_img is not None:
+        import urllib.request
+        bbox_str = f"{REGIONS[region][0]},{REGIONS[region][2]},{REGIONS[region][1]},{REGIONS[region][3]}"
+        url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={bbox_str}"
+        try:
+            req = urllib.request.urlopen(url)
+            radar_img = plt.imread(req, format='png')
             ax.imshow(radar_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=2)
+        except: pass
     elif not is_blanko:
         if overlays.get('clouds') and overlays.get('extra_data') is not None and "Signifikantes Wetter" in legend_title:
             cloud_cmap = mcolors.LinearSegmentedColormap.from_list("clouds", ["#ffffff00", "#ffffff"])
@@ -740,7 +755,7 @@ with tab_design:
     
     st.session_state.design['watermark'] = st.text_input("©️ Wasserzeichen (Text)", value=st.session_state.design.get('watermark', ''))
     
-    if st.button("💾 Design & Wasserzeichen Speichern", type="primary", use_container_width=True): save_design_config(st.session_state.design)
+    if st.button("💾 Design & Wasserzeichen Speichern", type="primary", width="stretch"): save_design_config(st.session_state.design)
 
     if "Live-Radar" not in model_choice and param_choice != "Blanko / Nur Basiskarte":
         st.divider()
@@ -777,9 +792,9 @@ with tab_design:
             st.session_state.config[param_choice] = new_config
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if st.button("➕ Neu", use_container_width=True): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
+                if st.button("➕ Neu", width="stretch"): st.session_state.config[param_choice].append({"value": max([c['value'] for c in new_config]) + 1 if new_config else 0.0, "color": "#ffffff", "_id": str(uuid.uuid4())}); st.rerun()
             with col_btn2:
-                if st.button("💾 Skala Speichern", use_container_width=True): save_param_config(param_choice, st.session_state.config[param_choice])
+                if st.button("💾 Skala Speichern", width="stretch"): save_param_config(param_choice, st.session_state.config[param_choice])
                 
             st.divider()
             st.subheader("📥 Gespeicherte Skala laden")
@@ -787,7 +802,7 @@ with tab_design:
             if cloud_files:
                 selected_file = st.selectbox("Cloud-Dateien:", ["-- Wählen --"] + cloud_files, label_visibility="collapsed")
                 if selected_file != "-- Wählen --":
-                    if st.button("Laden & Anwenden", use_container_width=True):
+                    if st.button("Laden & Anwenden", width="stretch"):
                         try:
                             g = get_github_client()
                             repo = g.get_repo(st.secrets["GITHUB_REPO"])
@@ -823,12 +838,12 @@ with tab_map:
     cache_key = f"{model_choice}_{run_time.strftime('%Y%m%d%H') if not 'Live' in model_choice else 'live'}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
     if cache_key in st.session_state.map_cache:
-        st.image(st.session_state.map_cache[cache_key]["image"], use_container_width=True)
+        st.image(st.session_state.map_cache[cache_key]["image"], width="stretch")
         if st.session_state.map_cache[cache_key].get("extremes"):
             st.info(f"**Extremwerte (Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
     else:
         btn_label = "🗺️ Live-Radar laden" if "Live" in model_choice else f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen"
-        if st.button(btn_label, type="primary", use_container_width=True):
+        if st.button(btn_label, type="primary", width="stretch"):
             with st.spinner("Lade Daten und rendere Karte..."):
                 if "Live-Radar" in model_choice:
                     img_bytes = create_map([], None, None, None, f"Aktuell | {selected_datetime.strftime('%d.%m. %H:%M')} Uhr", "", model_choice, region_choice, {"cities": show_cities}, st.session_state.design)
@@ -886,7 +901,7 @@ with tab_map:
 
     if not "Live" in model_choice:
         st.divider()
-        if st.button("🔄 Alle Karten vorladen (Zwischenspeicher)", use_container_width=True):
+        if st.button("🔄 Alle Karten vorladen (Zwischenspeicher)", width="stretch"):
             progress_bar = st.progress(0.0)
             status_text = st.empty()
             
@@ -938,7 +953,7 @@ with tab_ens:
     om_model_map = {"ICON-EPS (DWD)": "icon_seamless", "ICON-D2-EPS (DWD)": "icon_d2", "GFS-ENS (NOAA)": "gfs_seamless", "ECMWF-EPS": "ecmwf_ensemble"}
     om_param_map = {"Temperatur (2m)": "temperature_2m", "850 hPa Temp.": "temperature_850hPa", "Niederschlag (mm/h)": "precipitation", "Windböen (km/h)": "wind_gusts_10m", "CAPE (J/kg)": "cape"}
     
-    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", use_container_width=True):
+    if st.button("🚀 Ensemble-Diagramm berechnen", type="primary", width="stretch"):
         with st.spinner(f"Lade alle Modell-Mitglieder für {ens_city}..."):
             lon_c, lat_c = GERMAN_CITIES[ens_city]
             ens_data = fetch_ensemble_data(lat_c, lon_c, om_param_map[ens_param], om_model_map[ens_model])
