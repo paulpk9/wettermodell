@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import xarray as xr
 import scipy.ndimage as ndimage
 import io
+import math
 from PIL import Image
 
 # --- SEITEN-LAYOUT & CSS ---
@@ -38,6 +39,13 @@ st.markdown("""
         
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
         [data-testid="stColorPicker"] input { display: none !important; }
+        
+        /* Modernes Button-Look für Radio-Elemente in Popovers */
+        div.stRadio > div[role="radiogroup"] > label {
+            background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255,255,255,0.1);
+            padding: 10px 15px; border-radius: 8px; margin-bottom: 4px; transition: 0.2s;
+        }
+        div.stRadio > div[role="radiogroup"] > label:hover { background: rgba(255, 255, 255, 0.1); }
     </style>
 """, unsafe_allow_html=True)
 
@@ -88,6 +96,7 @@ if "model_choice" not in st.session_state: st.session_state.model_choice = "Eige
 if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
 if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
 if "eps_choice" not in st.session_state: st.session_state.eps_choice = "Ensemble-Mittel"
+if "radar_color" not in st.session_state: st.session_state.radar_color = 2
 
 SIG_WETTER_LABELS = {
     1: "Nebel", 2: "Regen (leicht)", 3: "Regen (mäßig)", 4: "Regen (stark)",
@@ -98,9 +107,13 @@ SIG_WETTER_LABELS = {
 
 DEFAULT_CONFIGS = {
     "Temperatur (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 15.0, "color": "#fdae61"}, {"value": 30.0, "color": "#d73027"}],
+    "Taupunkt (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 10.0, "color": "#e0f3f8"}, {"value": 15.0, "color": "#fdae61"}, {"value": 22.0, "color": "#d73027"}],
     "Windböen 10m": [{"value": 0.0, "color": "#ffffff"}, {"value": 40.0, "color": "#ffffcc"}, {"value": 70.0, "color": "#fd8d3c"}, {"value": 100.0, "color": "#e31a1c"}, {"value": 130.0, "color": "#800026"}],
     "Akk. Niederschlag (mm)": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 10.0, "color": "#1f78b4"}, {"value": 30.0, "color": "#33a02c"}],
     "Niederschlagsrate (mm/h)": [{"value": 0.0, "color": "#ffffff"}, {"value": 0.5, "color": "#a6cee3"}, {"value": 2.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#33a02c"}],
+    "Sichtweite (m)": [{"value": 0.0, "color": "#800026"}, {"value": 200.0, "color": "#e31a1c"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 5000.0, "color": "#ffffcc"}, {"value": 20000.0, "color": "#ffffff"}],
+    "Nullgradgrenze (m)": [{"value": 0.0, "color": "#313695"}, {"value": 1000.0, "color": "#74add1"}, {"value": 2000.0, "color": "#e0f3f8"}, {"value": 3000.0, "color": "#fdae61"}, {"value": 4000.0, "color": "#d73027"}],
+    "Sonneneinstrahlung (W/m²)": [{"value": 0.0, "color": "#ffffff"}, {"value": 200.0, "color": "#ffffcc"}, {"value": 500.0, "color": "#fdae61"}, {"value": 800.0, "color": "#f46d43"}, {"value": 1000.0, "color": "#d73027"}],
     "500 hPa Geopot. Height": [{"value": 500.0, "color": "#313695"}, {"value": 540.0, "color": "#e0f3f8"}, {"value": 580.0, "color": "#d73027"}],
     "850 hPa Temp.": [{"value": -20.0, "color": "#313695"}, {"value": -10.0, "color": "#74add1"}, {"value": 0.0, "color": "#ffffff"}, {"value": 10.0, "color": "#fdae61"}, {"value": 20.0, "color": "#d73027"}],
     "MLCAPE": [{"value": 0.0, "color": "#ffffff"}, {"value": 250.0, "color": "#ffffcc"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 2500.0, "color": "#e31a1c"}],
@@ -114,6 +127,7 @@ DEFAULT_CONFIGS = {
     "SCP-Index": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 5.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#fd8d3c"}, {"value": 20.0, "color": "#e31a1c"}],
     "PWAT (mm)": [{"value": 10.0, "color": "#ffffff"}, {"value": 20.0, "color": "#a6cee3"}, {"value": 30.0, "color": "#1f78b4"}, {"value": 40.0, "color": "#33a02c"}, {"value": 50.0, "color": "#e31a1c"}],
     "Gesamtbewölkung (%)": [{"value": 0.0, "color": "#f0f0f0"}, {"value": 25.0, "color": "#c6dbef"}, {"value": 50.0, "color": "#9ecae1"}, {"value": 75.0, "color": "#6baed6"}, {"value": 100.0, "color": "#3182bd"}],
+    "Tiefe Wolken (%)": [{"value": 0.0, "color": "#f0f0f0"}, {"value": 25.0, "color": "#c6dbef"}, {"value": 50.0, "color": "#9ecae1"}, {"value": 75.0, "color": "#6baed6"}, {"value": 100.0, "color": "#3182bd"}],
     "Blanko / Nur Basiskarte": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#000000"}],
     "Signifikantes Wetter": [
         {"value": 1.0, "color": "#d9d9d9"}, {"value": 2.0, "color": "#a1d99b"}, {"value": 3.0, "color": "#31a354"},
@@ -188,14 +202,52 @@ def load_borders():
     return gpd.read_file(f1_name), gpd.read_file(f2_name)
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_dwd_radar(lon_min, lon_max, lat_min, lat_max):
-    url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={lon_min},{lat_min},{lon_max},{lat_max}"
+def get_rainviewer_radar(lon_min, lon_max, lat_min, lat_max, color_scheme=2):
     try:
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        if resp.status_code == 200:
-            return np.array(Image.open(io.BytesIO(resp.content)))
-    except: pass
-    return None
+        resp = requests.get("https://api.rainviewer.com/public/weather-maps.json", timeout=5).json()
+        latest_time = resp['radar']['past'][-1]['time']
+        
+        zoom = 6
+        def deg2num(lat_deg, lon_deg, zoom):
+            lat_rad = math.radians(lat_deg)
+            n = 2.0 ** zoom
+            xtile = int((lon_deg + 180.0) / 360.0 * n)
+            ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+            return (xtile, ytile)
+
+        xmin, ymin = deg2num(lat_max, lon_min, zoom) 
+        xmax, ymax = deg2num(lat_min, lon_max, zoom) 
+
+        tiles = []
+        for x in range(xmin, xmax + 1):
+            for y in range(ymin, ymax + 1):
+                url = f"https://tilecache.rainviewer.com/v2/radar/{latest_time}/256/{zoom}/{x}/{y}/{color_scheme}/1_1.png"
+                r = requests.get(url, timeout=5)
+                if r.status_code == 200:
+                    img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                    tiles.append({'x': x, 'y': y, 'img': img})
+
+        if not tiles: return None, None
+
+        def num2deg(xtile, ytile, zoom):
+            n = 2.0 ** zoom
+            lon_deg = xtile / n * 360.0 - 180.0
+            lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
+            lat_deg = math.degrees(lat_rad)
+            return (lat_deg, lon_deg)
+
+        stitch_xmin_deg = num2deg(xmin, ymax+1, zoom)[1]
+        stitch_xmax_deg = num2deg(xmax+1, ymax+1, zoom)[1]
+        stitch_ymin_deg = num2deg(xmax+1, ymax+1, zoom)[0]
+        stitch_ymax_deg = num2deg(xmin, ymin, zoom)[0]
+
+        tile_w = 256
+        stitched = Image.new("RGBA", ((xmax - xmin + 1) * tile_w, (ymax - ymin + 1) * tile_w))
+        for t in tiles:
+            stitched.paste(t['img'], ((t['x'] - xmin) * tile_w, (t['y'] - ymin) * tile_w))
+
+        return np.array(stitched), [stitch_xmin_deg, stitch_xmax_deg, stitch_ymin_deg, stitch_ymax_deg]
+    except: return None, None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ensemble_data(lat, lon, param, model):
@@ -217,6 +269,7 @@ def get_available_runs(model_name):
     elif "EPS" in model_name: step, delay = 3, 3.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
+    elif "Global" in model_name: step, delay = 6, 4.0
     else: step, delay = 3, 2.5
     eff_now = now - timedelta(hours=delay)
     latest = eff_now.replace(hour=(eff_now.hour // step) * step, minute=0, second=0, microsecond=0)
@@ -267,7 +320,10 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
             "Temperatur (2m)": "var_TMP=on&lev_2_m_above_ground=on", "Akk. Niederschlag (mm)": "var_APCP=on&lev_surface=on", 
             "Windböen 10m": "var_GUST=on&lev_surface=on", "Niederschlagsrate (mm/h)": "var_PRATE=on&lev_surface=on",
             "MLCAPE": "var_CAPE=on&lev_surface=on", "CIN": "var_CIN=on&lev_surface=on", "PMSL": "var_PRMSL=on&lev_mean_sea_level=on",
-            "Gesamtbewölkung (%)": "var_TCDC=on&lev_entire_atmosphere=on", "PWAT (mm)": "var_PWAT=on&lev_entire_atmosphere=on"
+            "Gesamtbewölkung (%)": "var_TCDC=on&lev_entire_atmosphere=on", "PWAT (mm)": "var_PWAT=on&lev_entire_atmosphere=on",
+            "Taupunkt (2m)": "var_DPT=on&lev_2_m_above_ground=on", "Sichtweite (m)": "var_VIS=on&lev_surface=on",
+            "Nullgradgrenze (m)": "var_HGT=on&lev_0C_isotherm=on", "Tiefe Wolken (%)": "var_LCDC=on&lev_low_cloud_layer=on",
+            "Sonneneinstrahlung (W/m²)": "var_DSWRF=on&lev_surface=on"
         }
         fs = vm.get(param_name, "")
         if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
@@ -284,7 +340,10 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
         "Radarreflektivität (dBZ)": ("dbz_cmax", "dbz_cmax", None), "Blitzrate (LPI)": ("lpi_max", "lpi_max", None),
         "U-Wind 10m": ("u_10m", "u_10m", None), "V-Wind 10m": ("v_10m", "v_10m", None),
         "U-Wind 850hPa": ("u", "u", "850"), "V-Wind 850hPa": ("v", "v", "850"),
-        "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500")
+        "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500"),
+        "Taupunkt (2m)": ("td_2m", "td_2m", None), "Sichtweite (m)": ("vis", "vis", None),
+        "Nullgradgrenze (m)": ("hzerocl", "hzerocl", None), "Tiefe Wolken (%)": ("clcl", "clcl", None),
+        "Sonneneinstrahlung (W/m²)": ("aswdir_s", "aswdir_s", None)
     }
         
     if param_name not in dm: return None, None, None
@@ -304,13 +363,14 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
                 base + prefix + f"2d_{var}.grib2.bz2",
                 base + prefix + f"{var.replace('2d_', '')}.grib2.bz2"
             ])
-    elif "EU" in model:
-        base = f"https://opendata.dwd.de/weather/nwp/icon-eu/grib/{run_str}/{fld}/"
+    elif "EU" in model or "Global" in model:
+        m_str = "icon-eu-eps" if "EPS" in model else ("icon-global" if "Global" in model else "icon-eu")
+        base = f"https://opendata.dwd.de/weather/nwp/{m_str}/grib/{run_str}/{fld}/"
         if lvl:
-            prefix = f"icon-eu_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_"
+            prefix = f"{m_str}_europe_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_" if "EU" in model else f"{m_str}_icosahedral_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_"
             urls_to_try.append(base + prefix + f"{var.upper()}.grib2.bz2")
         else:
-            prefix = f"icon-eu_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_"
+            prefix = f"{m_str}_europe_regular-lat-lon_single-level_{date_str}{run_str}_{hour_str}_" if "EU" in model else f"{m_str}_icosahedral_single-level_{date_str}{run_str}_{hour_str}_"
             urls_to_try.extend([base + prefix + f"{var.upper()}.grib2.bz2", base + prefix + f"{var.replace('2d_', '').upper()}.grib2.bz2"])
             
     for u in urls_to_try:
@@ -322,7 +382,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
 
 def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlays, eps_choice=None):
     if "Live-Radar" in model_type:
-        return np.zeros((2,2)), np.zeros((2,2)), None, "Live Regenradar (DWD)", None, None
+        return np.zeros((2,2)), np.zeros((2,2)), None, "Live Regenradar (Rainviewer)", None, None
 
     if param_name == "Blanko / Nur Basiskarte":
         res_t = get_raw_grib(run_time, forecast_hour, model_type, "Temperatur (2m)", eps_choice)
@@ -419,19 +479,10 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
                 cti = np.clip(ndimage.zoom(cti, zf, order=3), 0, None)
             return lons_out, lats_out, cti, "Chaser Target-Index (CTI)", None, None
 
-    if param_name in ["Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"] and forecast_hour == 0:
-        res_t = get_raw_grib(run_time, forecast_hour, model_type, "Temperatur (2m)", eps_choice)
-        if res_t[0] is None: return None, None, None, "", None, None
-        lons, lats = res_t[0], res_t[1]
-        vals = np.zeros_like(lons)
-    else:
-        res_main = get_raw_grib(run_time, forecast_hour, model_type, param_name, eps_choice)
-        if res_main[0] is None: return None, None, None, "", None, None
-        lons, lats, vals = res_main[0], res_main[1], res_main[2]
-        if isinstance(vals, tuple): 
-            vals, p_raw = vals
-            pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
-        vals = np.squeeze(vals)
+    lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name, eps_choice)
+    if vals is None: return None, None, None, "", None, None
+    if isinstance(vals, tuple): vals, p_raw = vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
+    vals = np.squeeze(vals)
     
     if param_name == "Signifikantes Wetter" and overlays.get('clouds'):
         res_c = get_raw_grib(run_time, forecast_hour, model_type, "Gesamtbewölkung (%)", eps_choice)
@@ -460,10 +511,14 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
             vals = np.clip(vals, 0, None)
 
     title = ""
-    if "Temp" in param_name: vals -= 273.15; title = "Temperatur in °C"
+    if "Temp" in param_name or "Taupunkt" in param_name: vals -= 273.15; title = f"{param_name.split(' ')[0]} in °C"
     elif "Windböen" in param_name: vals *= 3.6; title = "Windböen in km/h"
     elif param_name == "Akk. Niederschlag (mm)": title = "Niederschlag in mm"
     elif param_name == "Gesamtbewölkung" in param_name: title = "Gesamtbewölkung in %"
+    elif param_name == "Tiefe Wolken (%)": title = "Tiefe Wolken in %"
+    elif param_name == "Sichtweite (m)": title = "Sichtweite in m"
+    elif param_name == "Nullgradgrenze (m)": title = "Nullgradgrenze in m"
+    elif param_name == "Sonneneinstrahlung (W/m²)": title = "Sonneneinstrahlung (W/m²)"
     elif param_name == "PWAT" in param_name: title = "PWAT in mm"
     elif param_name == "Radarreflektivität" in param_name: title = "Reflektivität in dBZ"
     elif param_name == "Blitzrate" in param_name: title = "LPI (Blitzpotenzial)"
@@ -506,11 +561,11 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
 
 # --- MAP RENDERER ---
 def get_scientific_cmap(param_name):
-    if "Temp" in param_name: return "turbo"
+    if "Temp" in param_name or "Taupunkt" in param_name: return "turbo"
     if "Wind" in param_name or "Scherung" in param_name: return "plasma"
     if "Niederschlag" in param_name or "Regen" in param_name or "PWAT" in param_name: return "viridis_r"
-    if "CAPE" in param_name or "LPI" in param_name or "SCP" in param_name or "Chaser" in param_name: return "magma_r"
-    if "Bewölkung" in param_name: return "Greys_r"
+    if "CAPE" in param_name or "LPI" in param_name or "SCP" in param_name or "Chaser" in param_name or "Sonnen" in param_name: return "magma_r"
+    if "Bewölkung" in param_name or "Tiefe Wolken" in param_name or "Sichtweite" in param_name: return "Greys_r"
     if "Radar" in param_name: return "nipy_spectral"
     return "turbo"
 
@@ -519,7 +574,7 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
     
     is_categorical = (legend_title == "Signifikantes Wetter" or "[Eigenmodell D-Scale] Signifikantes Wetter" in legend_title)
     is_discrete = design.get('discrete_colors', False)
-    is_live_radar = (model_type == "Live-Radar (DWD)")
+    is_live_radar = (model_type == "Live-Radar (Rainviewer)")
     is_blanko = (legend_title == "Basiskarte (ohne Daten)")
     use_sci_cmap = design.get('scientific_cmap', False)
     
@@ -566,14 +621,10 @@ def create_map(config_list, lons, lats, data, map_title_time, legend_title, mode
         ax.set_ylim(REGIONS[region][2], REGIONS[region][3])
 
     if is_live_radar:
-        import urllib.request
-        bbox_str = f"{REGIONS[region][0]},{REGIONS[region][2]},{REGIONS[region][1]},{REGIONS[region][3]}"
-        url = f"https://maps.dwd.de/geoserver/dwd/wms?service=WMS&request=GetMap&version=1.1.1&layers=dwd:RX-Produkt&format=image/png&transparent=true&width=1000&height=1000&srs=EPSG:4326&bbox={bbox_str}"
-        try:
-            req = urllib.request.urlopen(url)
-            radar_img = plt.imread(req, format='png')
-            ax.imshow(radar_img, extent=[REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3]], aspect='auto', zorder=2)
-        except: pass
+        color_scheme = st.session_state.get('radar_color', 2)
+        radar_img, r_extent = get_rainviewer_radar(REGIONS[region][0], REGIONS[region][1], REGIONS[region][2], REGIONS[region][3], color_scheme)
+        if radar_img is not None:
+            ax.imshow(radar_img, extent=r_extent, aspect='auto', zorder=2)
     elif not is_blanko:
         if overlays.get('clouds') and overlays.get('extra_data') is not None and "Signifikantes Wetter" in legend_title:
             cloud_cmap = mcolors.LinearSegmentedColormap.from_list("clouds", ["#ffffff00", "#ffffff"])
@@ -669,8 +720,10 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (DWD)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "GFS (+384h)"]
-    st.session_state.model_choice = st.selectbox("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2)
+    # NEU: Aufklappbare Menüs (Popover) mit Knopf-Layout (Radio-Buttons)
+    model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
+    with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
+        st.session_state.model_choice = st.radio("Modell auswählen:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2, label_visibility="collapsed")
     
     model_choice = st.session_state.model_choice
     
@@ -680,24 +733,32 @@ with tab_main:
         run_time = available_runs[run_label]
         
         eps_choice = None
-        if "EPS (+48h)" in model_choice:
-            eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21)]
-            eps_choice = st.selectbox("Ensemble-Mitglied:", eps_members, index=0)
+        if "EPS" in model_choice:
+            eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21 if "D2" in model_choice else 41)]
+            with st.popover(f"🔀 Member: {st.session_state.eps_choice}", width="stretch"):
+                st.session_state.eps_choice = st.radio("Member:", eps_members, index=eps_members.index(st.session_state.eps_choice) if st.session_state.eps_choice in eps_members else 0, label_visibility="collapsed")
+            eps_choice = st.session_state.eps_choice
         
-        param_list = ["Temperatur (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
+        # NEU: Die 5 neuen Profi-Parameter hinzugefügt
+        param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "Nullgradgrenze (m)", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
         if "D2" in model_choice or "Eigenmodell" in model_choice:
             param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"])
 
         if st.session_state.param_choice not in param_list:
             st.session_state.param_choice = param_list[0]
 
-        st.session_state.param_choice = st.selectbox("🌡️ Parameter:", param_list, index=param_list.index(st.session_state.param_choice))
+        with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", width="stretch"):
+            st.session_state.param_choice = st.radio("Parameter:", param_list, index=param_list.index(st.session_state.param_choice), label_visibility="collapsed")
+            
         param_choice = st.session_state.param_choice
         
         if param_choice not in st.session_state.config and param_choice != "Blanko / Nur Basiskarte": 
             st.session_state.config[param_choice] = load_param_config(param_choice)
     else:
-        st.info("Live-Radar aktiv. Zeit- & Parameterauswahl deaktiviert.")
+        st.info("Rainviewer Live-Radar aktiv. Zeit- & Parameterauswahl deaktiviert.")
+        # Farbauswahl für Rainviewer
+        rv_colors = {1: "Original", 2: "Universal Blue", 3: "TITAN", 4: "The Weather Channel", 5: "Meteored", 6: "NEXRAD Level-III", 7: "Rainbow", 8: "Dark Sky"}
+        st.session_state.radar_color = st.selectbox("Radar Farbschema:", list(rv_colors.keys()), index=1, format_func=lambda x: rv_colors[x])
         run_time = datetime.now(timezone.utc)
         param_choice = "Radarreflektivität (Live)"
         eps_choice = None
@@ -706,7 +767,8 @@ with tab_main:
     if "D2" in model_choice or "Live" in model_choice or "Eigenmodell" in model_choice: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
-    st.session_state.region_choice = st.selectbox("📍 Region:", region_options, index=region_options.index(st.session_state.region_choice))
+    with st.popover(f"📍 Region: {st.session_state.region_choice}", width="stretch"):
+        st.session_state.region_choice = st.radio("Region:", region_options, index=region_options.index(st.session_state.region_choice), label_visibility="collapsed")
     region_choice = st.session_state.region_choice
     
     run_to_run = False
@@ -719,7 +781,7 @@ with tab_overlays:
     show_pmsl = st.toggle("💨 Isobaren (Luftdruck)", value=True) if param_choice == "850 hPa Temp." else False
     
     show_numbers = False
-    if param_choice in ["Temperatur (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
+    if param_choice in ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
         show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
         
     show_clouds = False
@@ -814,7 +876,7 @@ with tab_design:
 tab_map, tab_ens = st.tabs(["🗺️ Karten-Terminal", "📈 Ensemble (Spaghetti)"])
 
 with tab_map:
-    max_h = 0 if "Live" in model_choice else (24 if "Eigenmodell" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))))
+    max_h = 0 if "Live" in model_choice else (24 if "Eigenmodell" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice or "Global" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))))
     step_h = 3 if "GFS" in model_choice else 1
     tz_berlin = ZoneInfo("Europe/Berlin")
     start_time_local = run_time.astimezone(tz_berlin)
@@ -834,7 +896,7 @@ with tab_map:
         chosen_f_hour = 0
         selected_datetime = start_time_local
 
-    config_hash = hash(str(st.session_state.config.get(param_choice)) + str(st.session_state.design) + str(show_cities) + str(show_clouds) + str(show_numbers) + (str(eps_choice) if not "Live" in model_choice else "") + str(run_to_run))
+    config_hash = hash(str(st.session_state.config.get(param_choice)) + str(st.session_state.design) + str(show_cities) + str(show_clouds) + str(show_numbers) + (str(eps_choice) if not "Live" in model_choice else "") + str(run_to_run) + str(st.session_state.get('radar_color', 2)))
     cache_key = f"{model_choice}_{run_time.strftime('%Y%m%d%H') if not 'Live' in model_choice else 'live'}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
     if cache_key in st.session_state.map_cache:
@@ -842,7 +904,7 @@ with tab_map:
         if st.session_state.map_cache[cache_key].get("extremes"):
             st.info(f"**Extremwerte (Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
     else:
-        btn_label = "🗺️ Live-Radar laden" if "Live" in model_choice else f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen"
+        btn_label = "🗺️ Rainviewer-Radar laden" if "Live" in model_choice else f"🗺️ Karte für +{chosen_f_hour}h berechnen & anzeigen"
         if st.button(btn_label, type="primary", width="stretch"):
             with st.spinner("Lade Daten und rendere Karte..."):
                 if "Live-Radar" in model_choice:
