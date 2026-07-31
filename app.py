@@ -40,7 +40,6 @@ st.markdown("""
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
         [data-testid="stColorPicker"] input { display: none !important; }
         
-        /* Modernes Button-Look für Radio-Elemente in Popovers */
         div.stRadio > div[role="radiogroup"] > label {
             background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255,255,255,0.1);
             padding: 10px 15px; border-radius: 8px; margin-bottom: 4px; transition: 0.2s;
@@ -109,8 +108,12 @@ DEFAULT_CONFIGS = {
     "Temperatur (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 15.0, "color": "#fdae61"}, {"value": 30.0, "color": "#d73027"}],
     "Taupunkt (2m)": [{"value": -10.0, "color": "#313695"}, {"value": 0.0, "color": "#74add1"}, {"value": 10.0, "color": "#e0f3f8"}, {"value": 15.0, "color": "#fdae61"}, {"value": 22.0, "color": "#d73027"}],
     "Windböen 10m": [{"value": 0.0, "color": "#ffffff"}, {"value": 40.0, "color": "#ffffcc"}, {"value": 70.0, "color": "#fd8d3c"}, {"value": 100.0, "color": "#e31a1c"}, {"value": 130.0, "color": "#800026"}],
+    "Windgeschw. Mittel 10m": [{"value": 0.0, "color": "#ffffff"}, {"value": 20.0, "color": "#ffffcc"}, {"value": 50.0, "color": "#fd8d3c"}, {"value": 80.0, "color": "#e31a1c"}, {"value": 110.0, "color": "#800026"}],
     "Akk. Niederschlag (mm)": [{"value": 0.0, "color": "#ffffff"}, {"value": 1.0, "color": "#a6cee3"}, {"value": 10.0, "color": "#1f78b4"}, {"value": 30.0, "color": "#33a02c"}],
     "Niederschlagsrate (mm/h)": [{"value": 0.0, "color": "#ffffff"}, {"value": 0.5, "color": "#a6cee3"}, {"value": 2.0, "color": "#1f78b4"}, {"value": 10.0, "color": "#33a02c"}],
+    "Relative Luftfeuchte 2m (%)": [{"value": 0.0, "color": "#ffffcc"}, {"value": 40.0, "color": "#a1d99b"}, {"value": 70.0, "color": "#41b6c4"}, {"value": 90.0, "color": "#225ea8"}, {"value": 100.0, "color": "#081d58"}],
+    "Schneehöhe (cm)": [{"value": 0.0, "color": "#ffffff"}, {"value": 5.0, "color": "#c6dbef"}, {"value": 15.0, "color": "#6baed6"}, {"value": 30.0, "color": "#2171b5"}, {"value": 100.0, "color": "#08306b"}],
+    "Luftdruck (hPa)": [{"value": 950.0, "color": "#8c510a"}, {"value": 990.0, "color": "#d8b365"}, {"value": 1013.0, "color": "#f6e8c3"}, {"value": 1030.0, "color": "#c7eae5"}, {"value": 1050.0, "color": "#5ab4ac"}],
     "Sichtweite (m)": [{"value": 0.0, "color": "#800026"}, {"value": 200.0, "color": "#e31a1c"}, {"value": 1000.0, "color": "#fd8d3c"}, {"value": 5000.0, "color": "#ffffcc"}, {"value": 20000.0, "color": "#ffffff"}],
     "Nullgradgrenze (m)": [{"value": 0.0, "color": "#313695"}, {"value": 1000.0, "color": "#74add1"}, {"value": 2000.0, "color": "#e0f3f8"}, {"value": 3000.0, "color": "#fdae61"}, {"value": 4000.0, "color": "#d73027"}],
     "Sonneneinstrahlung (W/m²)": [{"value": 0.0, "color": "#ffffff"}, {"value": 200.0, "color": "#ffffcc"}, {"value": 500.0, "color": "#fdae61"}, {"value": 800.0, "color": "#f46d43"}, {"value": 1000.0, "color": "#d73027"}],
@@ -201,13 +204,15 @@ def load_borders():
         f1.write(w_r); f1_name = f1.name; f2.write(bl_r); f2_name = f2.name
     return gpd.read_file(f1_name), gpd.read_file(f2_name)
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def get_rainviewer_radar(lon_min, lon_max, lat_min, lat_max, color_scheme=2):
     try:
-        resp = requests.get("https://api.rainviewer.com/public/weather-maps.json", timeout=5).json()
-        latest_time = resp['radar']['past'][-1]['time']
+        # Offizielle v2 Methode umgeht 403 Forbidden Fehler
+        resp = requests.get("https://api.rainviewer.com/public/weather-maps.json", headers={'User-Agent': 'Mozilla/5.0'}, timeout=8).json()
+        host = resp.get("host", "https://tilecache.rainviewer.com")
+        path = resp['radar']['past'][-1]['path']
         
-        zoom = 6
+        zoom = 5
         def deg2num(lat_deg, lon_deg, zoom):
             lat_rad = math.radians(lat_deg)
             n = 2.0 ** zoom
@@ -221,8 +226,8 @@ def get_rainviewer_radar(lon_min, lon_max, lat_min, lat_max, color_scheme=2):
         tiles = []
         for x in range(xmin, xmax + 1):
             for y in range(ymin, ymax + 1):
-                url = f"https://tilecache.rainviewer.com/v2/radar/{latest_time}/256/{zoom}/{x}/{y}/{color_scheme}/1_1.png"
-                r = requests.get(url, timeout=5)
+                url = f"{host}{path}/256/{zoom}/{x}/{y}/{color_scheme}/1_1.png"
+                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
                 if r.status_code == 200:
                     img = Image.open(io.BytesIO(r.content)).convert("RGBA")
                     tiles.append({'x': x, 'y': y, 'img': img})
@@ -242,7 +247,7 @@ def get_rainviewer_radar(lon_min, lon_max, lat_min, lat_max, color_scheme=2):
         stitch_ymax_deg = num2deg(xmin, ymin, zoom)[0]
 
         tile_w = 256
-        stitched = Image.new("RGBA", ((xmax - xmin + 1) * tile_w, (ymax - ymin + 1) * tile_w))
+        stitched = Image.new("RGBA", ((xmax - xmin + 1) * tile_w, (ymax - ymin + 1) * tile_w), (0,0,0,0))
         for t in tiles:
             stitched.paste(t['img'], ((t['x'] - xmin) * tile_w, (t['y'] - ymin) * tile_w))
 
@@ -313,17 +318,18 @@ def download_and_extract(url, is_bz2=False, param_name=None, eps_member=None):
 def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
     if "Live-Radar" in model: return None, None, None
     run_str, date_str, hour_str = f"{run_time.hour:02d}", run_time.strftime("%Y%m%d"), f"{forecast_hour:03d}"
-    if param_name in ["CAPE & CIN (Deckel)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index", "Blanko / Nur Basiskarte"]: return None, None, None
+    if param_name in ["CAPE & CIN (Deckel)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index", "Blanko / Nur Basiskarte", "Windgeschw. Mittel 10m"]: return None, None, None
 
     if "GFS" in model:
         vm = {
             "Temperatur (2m)": "var_TMP=on&lev_2_m_above_ground=on", "Akk. Niederschlag (mm)": "var_APCP=on&lev_surface=on", 
             "Windböen 10m": "var_GUST=on&lev_surface=on", "Niederschlagsrate (mm/h)": "var_PRATE=on&lev_surface=on",
-            "MLCAPE": "var_CAPE=on&lev_surface=on", "CIN": "var_CIN=on&lev_surface=on", "PMSL": "var_PRMSL=on&lev_mean_sea_level=on",
+            "MLCAPE": "var_CAPE=on&lev_surface=on", "CIN": "var_CIN=on&lev_surface=on", "Luftdruck (hPa)": "var_PRMSL=on&lev_mean_sea_level=on",
             "Gesamtbewölkung (%)": "var_TCDC=on&lev_entire_atmosphere=on", "PWAT (mm)": "var_PWAT=on&lev_entire_atmosphere=on",
             "Taupunkt (2m)": "var_DPT=on&lev_2_m_above_ground=on", "Sichtweite (m)": "var_VIS=on&lev_surface=on",
             "Nullgradgrenze (m)": "var_HGT=on&lev_0C_isotherm=on", "Tiefe Wolken (%)": "var_LCDC=on&lev_low_cloud_layer=on",
-            "Sonneneinstrahlung (W/m²)": "var_DSWRF=on&lev_surface=on"
+            "Sonneneinstrahlung (W/m²)": "var_DSWRF=on&lev_surface=on", "Relative Luftfeuchte 2m (%)": "var_RH=on&lev_2_m_above_ground=on",
+            "Schneehöhe (cm)": "var_SNOD=on&lev_surface=on"
         }
         fs = vm.get(param_name, "")
         if param_name == "850 hPa Temp.": fs = "var_TMP=on&lev_850_mb=on&var_PRMSL=on&lev_mean_sea_level=on"
@@ -335,7 +341,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
         "Akk. Niederschlag (mm)": ("tot_prec", "tot_prec", None), "Niederschlagsrate (mm/h)": ("tot_prec", "tot_prec", None), 
         "500 hPa Geopot. Height": ("fi", "fi", "500"), "850 hPa Temp.": ("t", "t", "850"), 
         "MLCAPE": ("cape_ml", "cape_ml", None), "CIN": ("cin_ml", "cin_ml", None),
-        "PMSL": ("pmsl", "pmsl", None), "Signifikantes Wetter": ("ww", "ww", None),
+        "Luftdruck (hPa)": ("pmsl", "pmsl", None), "Signifikantes Wetter": ("ww", "ww", None),
         "Gesamtbewölkung (%)": ("clct", "clct", None), "PWAT (mm)": ("tqv", "tqv", None),
         "Radarreflektivität (dBZ)": ("dbz_cmax", "dbz_cmax", None), "Blitzrate (LPI)": ("lpi_max", "lpi_max", None),
         "U-Wind 10m": ("u_10m", "u_10m", None), "V-Wind 10m": ("v_10m", "v_10m", None),
@@ -343,7 +349,8 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
         "U-Wind 500hPa": ("u", "u", "500"), "V-Wind 500hPa": ("v", "v", "500"),
         "Taupunkt (2m)": ("td_2m", "td_2m", None), "Sichtweite (m)": ("vis", "vis", None),
         "Nullgradgrenze (m)": ("hzerocl", "hzerocl", None), "Tiefe Wolken (%)": ("clcl", "clcl", None),
-        "Sonneneinstrahlung (W/m²)": ("aswdir_s", "aswdir_s", None)
+        "Sonneneinstrahlung (W/m²)": ("aswdir_s", "aswdir_s", None), "Relative Luftfeuchte 2m (%)": ("relhum_2m", "relhum_2m", None),
+        "Schneehöhe (cm)": ("h_snow", "h_snow", None)
     }
         
     if param_name not in dm: return None, None, None
@@ -394,6 +401,15 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
 
     pmsl_data, extra_overlay = None, None
     
+    if param_name == "Windgeschw. Mittel 10m":
+        res_u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m", eps_choice)
+        res_v10 = get_raw_grib(run_time, forecast_hour, model_type, "V-Wind 10m", eps_choice)
+        if res_u10[2] is None: return None, None, None, "", None, None
+        u10 = np.squeeze(res_u10[2][0] if isinstance(res_u10[2], tuple) else res_u10[2])
+        v10 = np.squeeze(res_v10[2][0] if isinstance(res_v10[2], tuple) else res_v10[2])
+        wind_mag = np.sqrt(u10**2 + v10**2) * 3.6
+        return res_u10[0], res_u10[1], wind_mag, "Windgeschw. Mittel 10m (km/h)", None, None
+
     if param_name == "CAPE & CIN (Deckel)":
         lons, lats, cape_vals = get_raw_grib(run_time, forecast_hour, model_type, "MLCAPE", eps_choice)
         _, _, cin_vals = get_raw_grib(run_time, forecast_hour, model_type, "CIN", eps_choice)
@@ -502,7 +518,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         else:
             vals = ndimage.zoom(vals, zf, order=3)
             
-        if "Niederschlag" in param_name or "Radar" in param_name or "PWAT" in param_name or "LPI" in param_name or "Bewölkung" in param_name:
+        if "Niederschlag" in param_name or "Radar" in param_name or "PWAT" in param_name or "LPI" in param_name or "Bewölkung" in param_name or "Schnee" in param_name:
             vals = np.clip(vals, 0, None)
             
         if forecast_hour == 0 and ("Niederschlag" in param_name or "Radar" in param_name):
@@ -518,6 +534,12 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Tiefe Wolken (%)": title = "Tiefe Wolken in %"
     elif param_name == "Sichtweite (m)": title = "Sichtweite in m"
     elif param_name == "Nullgradgrenze (m)": title = "Nullgradgrenze in m"
+    elif param_name == "Schneehöhe (cm)": 
+        if "GFS" in model_type: vals = vals * 100.0 # GFS is in meters
+        else: vals = vals * 100.0 # DWD is in meters
+        title = "Schneehöhe in cm"
+    elif param_name == "Luftdruck (hPa)": vals = vals / 100.0; title = "Luftdruck in hPa"
+    elif param_name == "Relative Luftfeuchte 2m (%)": title = "Relative Luftfeuchte in %"
     elif param_name == "Sonneneinstrahlung (W/m²)": title = "Sonneneinstrahlung (W/m²)"
     elif param_name == "PWAT" in param_name: title = "PWAT in mm"
     elif param_name == "Radarreflektivität" in param_name: title = "Reflektivität in dBZ"
@@ -567,6 +589,8 @@ def get_scientific_cmap(param_name):
     if "CAPE" in param_name or "LPI" in param_name or "SCP" in param_name or "Chaser" in param_name or "Sonnen" in param_name: return "magma_r"
     if "Bewölkung" in param_name or "Tiefe Wolken" in param_name or "Sichtweite" in param_name: return "Greys_r"
     if "Radar" in param_name: return "nipy_spectral"
+    if "Feuchte" in param_name or "Schnee" in param_name: return "YlGnBu"
+    if "Luftdruck" in param_name: return "BrBG"
     return "turbo"
 
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, overlays, design):
@@ -720,7 +744,6 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # NEU: Aufklappbare Menüs (Popover) mit Knopf-Layout (Radio-Buttons)
     model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
         st.session_state.model_choice = st.radio("Modell auswählen:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2, label_visibility="collapsed")
@@ -739,10 +762,17 @@ with tab_main:
                 st.session_state.eps_choice = st.radio("Member:", eps_members, index=eps_members.index(st.session_state.eps_choice) if st.session_state.eps_choice in eps_members else 0, label_visibility="collapsed")
             eps_choice = st.session_state.eps_choice
         
-        # NEU: Die 5 neuen Profi-Parameter hinzugefügt
-        param_list = ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Gesamtbewölkung (%)", "Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "500 hPa Geopot. Height", "850 hPa Temp.", "Nullgradgrenze (m)", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
+        # Dynamisches Filtering der Parameter nach Modell
+        base_params = ["Temperatur (2m)", "Taupunkt (2m)", "Relative Luftfeuchte 2m (%)", "Windböen 10m", "Windgeschw. Mittel 10m", "Luftdruck (hPa)", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "Schneehöhe (cm)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
+        
         if "D2" in model_choice or "Eigenmodell" in model_choice:
-            param_list.extend(["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"])
+            param_list = base_params + ["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"]
+        elif "EU" in model_choice or "Global" in model_choice:
+            param_list = base_params + ["Signifikantes Wetter", "Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"]
+        elif "GFS" in model_choice:
+            param_list = base_params + ["Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)"]
+        else:
+            param_list = base_params
 
         if st.session_state.param_choice not in param_list:
             st.session_state.param_choice = param_list[0]
@@ -756,7 +786,6 @@ with tab_main:
             st.session_state.config[param_choice] = load_param_config(param_choice)
     else:
         st.info("Rainviewer Live-Radar aktiv. Zeit- & Parameterauswahl deaktiviert.")
-        # Farbauswahl für Rainviewer
         rv_colors = {1: "Original", 2: "Universal Blue", 3: "TITAN", 4: "The Weather Channel", 5: "Meteored", 6: "NEXRAD Level-III", 7: "Rainbow", 8: "Dark Sky"}
         st.session_state.radar_color = st.selectbox("Radar Farbschema:", list(rv_colors.keys()), index=1, format_func=lambda x: rv_colors[x])
         run_time = datetime.now(timezone.utc)
@@ -764,7 +793,8 @@ with tab_main:
         eps_choice = None
         
     region_options = list(REGIONS.keys())
-    if "D2" in model_choice or "Live" in model_choice or "Eigenmodell" in model_choice: region_options.remove("Europa") 
+    if "D2" in model_choice or "Live" in model_choice or "Eigenmodell" in model_choice:
+        if "Europa" in region_options: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
     with st.popover(f"📍 Region: {st.session_state.region_choice}", width="stretch"):
@@ -781,7 +811,7 @@ with tab_overlays:
     show_pmsl = st.toggle("💨 Isobaren (Luftdruck)", value=True) if param_choice == "850 hPa Temp." else False
     
     show_numbers = False
-    if param_choice in ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)"]:
+    if param_choice in ["Temperatur (2m)", "Taupunkt (2m)", "Windböen 10m", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "Schneehöhe (cm)"]:
         show_numbers = st.toggle("🔢 Zahlenwerte auf Karte", value=False)
         
     show_clouds = False
