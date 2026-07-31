@@ -1,0 +1,38 @@
+[
+    {
+        "value": 0.0,
+        "color": "#2d2d2d"
+    },
+    {
+        "value": 0.1,
+        "color": "#858585"
+    },
+    {
+        "value": 1.0,
+        "color": "#e4c000"
+    },
+    {
+        "value": 2.0,
+        "color": "#e07600"
+    },
+    {
+        "value": 3.0,
+        "color": "#e40000"
+    },
+    {
+        "value": 4.0,
+        "color": "#800000"
+    },
+    {
+        "value": 6.0,
+        "color": "#7d0072"
+    },
+    {
+        "value": 8.0,
+        "color": "#dd00cd"
+    },
+    {
+        "value": 10.0,
+        "color": "#fa7fff"
+    }
+]
