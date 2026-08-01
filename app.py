@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import numpy as np
 import geopandas as gpd
@@ -36,9 +37,11 @@ st.markdown("""
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
         [data-testid="stColorPicker"] input { display: none !important; }
         
+        /* Mobile-Friendly Buttons in der Sidebar */
         div.stRadio > div[role="radiogroup"] > label {
             background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255,255,255,0.1);
             padding: 10px 15px; border-radius: 8px; margin-bottom: 4px; transition: 0.2s;
+            cursor: pointer;
         }
         div.stRadio > div[role="radiogroup"] > label:hover { background: rgba(255, 255, 255, 0.1); }
     </style>
@@ -140,24 +143,26 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
+    # NEU: Mobile-Friendly Buttons anstelle von Popover/Selectbox
     model_options = ["AI-Blend (GFS 20%, ICON 20%, AIFS 30%, AICON 30%) (+168h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
-    with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
-        st.session_state.model_choice = st.radio("Modell auswählen:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2, label_visibility="collapsed")
+    st.session_state.model_choice = st.radio("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2)
     
     model_choice = st.session_state.model_choice
     
     if "Live-Radar" not in model_choice:
+        st.divider()
         available_runs = get_available_runs(model_choice)
-        run_label = st.selectbox("Modelllauf:", list(available_runs.keys()))
+        run_label = st.radio("🕒 Modelllauf:", list(available_runs.keys()))
         run_time = available_runs[run_label]
         
         eps_choice = None
         if "EPS" in model_choice:
+            st.divider()
             eps_members = ["Ensemble-Mittel"] + [f"Member {i}" for i in range(1, 21 if "D2" in model_choice else 41)]
-            with st.popover(f"🔀 Member: {st.session_state.eps_choice}", width="stretch"):
-                st.session_state.eps_choice = st.radio("Member:", eps_members, index=eps_members.index(st.session_state.eps_choice) if st.session_state.eps_choice in eps_members else 0, label_visibility="collapsed")
+            st.session_state.eps_choice = st.radio("🔀 Member:", eps_members, index=eps_members.index(st.session_state.eps_choice) if st.session_state.eps_choice in eps_members else 0)
             eps_choice = st.session_state.eps_choice
         
+        st.divider()
         base_params = ["Temperatur (2m)", "Taupunkt (2m)", "Relative Luftfeuchte 2m (%)", "Windböen 10m", "Windgeschw. Mittel 10m", "Luftdruck (hPa)", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "Schneehöhe (cm)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
         
         if "D2" in model_choice or "AI-Blend" in model_choice:
@@ -172,9 +177,7 @@ with tab_main:
         if st.session_state.param_choice not in param_list:
             st.session_state.param_choice = param_list[0]
 
-        with st.popover(f"🌡️ Parameter: {st.session_state.param_choice}", width="stretch"):
-            st.session_state.param_choice = st.radio("Parameter:", param_list, index=param_list.index(st.session_state.param_choice), label_visibility="collapsed")
-            
+        st.session_state.param_choice = st.radio("🌡️ Parameter:", param_list, index=param_list.index(st.session_state.param_choice))
         param_choice = st.session_state.param_choice
         
         if param_choice not in st.session_state.config and param_choice != "Blanko / Nur Basiskarte": 
@@ -182,22 +185,23 @@ with tab_main:
     else:
         st.info("Rainviewer Live-Radar aktiv. Zeit- & Parameterauswahl deaktiviert.")
         rv_colors = {1: "Original", 2: "Universal Blue", 3: "TITAN", 4: "The Weather Channel", 5: "Meteored", 6: "NEXRAD Level-III", 7: "Rainbow", 8: "Dark Sky"}
-        st.session_state.radar_color = st.selectbox("Radar Farbschema:", list(rv_colors.keys()), index=1, format_func=lambda x: rv_colors[x])
+        st.session_state.radar_color = st.radio("🎨 Radar Farbschema:", list(rv_colors.keys()), index=1, format_func=lambda x: rv_colors[x])
         run_time = datetime.now(timezone.utc)
         param_choice = "Radarreflektivität (Live)"
         eps_choice = None
         
+    st.divider()
     region_options = list(REGIONS.keys())
     if "D2" in model_choice or "Live" in model_choice:
         if "Europa" in region_options: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
-    with st.popover(f"📍 Region: {st.session_state.region_choice}", width="stretch"):
-        st.session_state.region_choice = st.radio("Region:", region_options, index=region_options.index(st.session_state.region_choice), label_visibility="collapsed")
+    st.session_state.region_choice = st.radio("📍 Region:", region_options, index=region_options.index(st.session_state.region_choice))
     region_choice = st.session_state.region_choice
     
     run_to_run = False
     if "Live-Radar" not in model_choice:
+        st.divider()
         run_to_run = st.toggle("🔄 Run-to-Run Shift (zum Vorlauf)", value=False)
 
 with tab_overlays:
