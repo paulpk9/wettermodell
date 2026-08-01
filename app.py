@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import numpy as np
 import geopandas as gpd
@@ -143,8 +142,8 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    # NEU: Mobile-Friendly Buttons anstelle von Popover/Selectbox
-    model_options = ["AI-Blend (GFS 20%, ICON 20%, AIFS 30%, AICON 30%) (+168h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
+    # NEU: Das fehlerhafte ICON-D2-RUC Modell wurde restlos entfernt.
+    model_options = ["AI-Blend (GFS 20%, ICON 20%, AIFS 30%, AICON 30%) (+168h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
     st.session_state.model_choice = st.radio("🌍 Modell:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2)
     
     model_choice = st.session_state.model_choice
@@ -305,7 +304,7 @@ with tab_design:
 tab_map, tab_ens = st.tabs(["🗺️ Karten-Terminal", "📈 Ensemble (Spaghetti)"])
 
 with tab_map:
-    max_h = 0 if "Live" in model_choice else (168 if "AI-Blend" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice or "Global" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))))
+    max_h = 0 if "Live" in model_choice else (168 if "AI-Blend" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice or "Global" in model_choice else (48 if "EPS" in model_choice else 48))))
     step_h = 3 if "GFS" in model_choice or "AI-Blend" in model_choice else 1
     tz_berlin = ZoneInfo("Europe/Berlin")
     start_time_local = run_time.astimezone(tz_berlin)
@@ -329,7 +328,7 @@ with tab_map:
     cache_key = f"{model_choice}_{run_time.strftime('%Y%m%d%H') if not 'Live' in model_choice else 'live'}_{param_choice}_{region_choice}_{chosen_f_hour}_{show_pmsl}_{config_hash}"
 
     if cache_key in st.session_state.map_cache:
-        st.image(st.session_state.map_cache[cache_key]["image"], width="stretch")
+        st.image(st.session_state.map_cache[cache_key]["image"])
         if st.session_state.map_cache[cache_key].get("extremes"):
             st.info(f"**Extremwerte (Deutschland):** {st.session_state.map_cache[cache_key]['extremes']}")
     else:
