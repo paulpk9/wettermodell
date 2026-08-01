@@ -1,4 +1,3 @@
-# data_loader.py
 import streamlit as st
 import numpy as np
 import requests
@@ -79,8 +78,6 @@ def get_available_runs(model_name):
     if "Live-Radar" in model_name: return {"Live": datetime.now(timezone.utc)}
     now = datetime.now(timezone.utc)
     if "AI-Blend" in model_name: step, delay = 6, 5.5
-    elif "Eigenmodell" in model_name: step, delay = 3, 2.5
-    elif "RUC" in model_name: step, delay = 1, 3.5 # FIX: RUC Delay auf 3.5h erhöht, damit der DWD Upload garantiert fertig ist
     elif "EPS" in model_name: step, delay = 3, 3.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
@@ -167,8 +164,8 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
     fld, var, lvl = dm[param_name]
     
     urls_to_try = []
-    if "D2" in model or "Eigenmodell" in model:
-        m_str = "icon-d2-eps" if "EPS" in model else ("icon-d2-ruc" if "RUC" in model else "icon-d2")
+    if "D2" in model:
+        m_str = "icon-d2-eps" if "EPS" in model else "icon-d2"
         base = f"https://opendata.dwd.de/weather/nwp/{m_str}/grib/{run_str}/{fld}/"
         if lvl:
             prefix = f"{m_str}_germany_regular-lat-lon_pressure-level_{date_str}{run_str}_{hour_str}_{lvl}_"
