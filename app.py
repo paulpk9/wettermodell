@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import xarray as xr
 import scipy.ndimage as ndimage
+from scipy.interpolate import griddata
 import io
 import math
 from PIL import Image
@@ -40,6 +41,7 @@ st.markdown("""
         .stSlider > div > div > div { background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%); }
         [data-testid="stColorPicker"] input { display: none !important; }
         
+        /* Modernes Button-Look für Radio-Elemente in Popovers */
         div.stRadio > div[role="radiogroup"] > label {
             background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255,255,255,0.1);
             padding: 10px 15px; border-radius: 8px; margin-bottom: 4px; transition: 0.2s;
@@ -91,7 +93,7 @@ if "f_hour" not in st.session_state: st.session_state.f_hour = 0
 if "config" not in st.session_state: st.session_state.config = {}
 if "design" not in st.session_state: st.session_state.design = load_design_config()
 
-if "model_choice" not in st.session_state: st.session_state.model_choice = "Eigenmodell High-Res (+24h)"
+if "model_choice" not in st.session_state: st.session_state.model_choice = "AI-Blend (GFS 20%, ICON 20%, AIFS 30%, AICON 30%) (+168h)"
 if "param_choice" not in st.session_state: st.session_state.param_choice = "Temperatur (2m)"
 if "region_choice" not in st.session_state: st.session_state.region_choice = "Deutschland"
 if "eps_choice" not in st.session_state: st.session_state.eps_choice = "Ensemble-Mittel"
@@ -207,7 +209,6 @@ def load_borders():
 @st.cache_data(ttl=180, show_spinner=False)
 def get_rainviewer_radar(lon_min, lon_max, lat_min, lat_max, color_scheme=2):
     try:
-        # Offizielle v2 Methode umgeht 403 Forbidden Fehler
         resp = requests.get("https://api.rainviewer.com/public/weather-maps.json", headers={'User-Agent': 'Mozilla/5.0'}, timeout=8).json()
         host = resp.get("host", "https://tilecache.rainviewer.com")
         path = resp['radar']['past'][-1]['path']
@@ -269,7 +270,7 @@ def fetch_ensemble_data(lat, lon, param, model):
 def get_available_runs(model_name):
     if "Live-Radar" in model_name: return {"Live": datetime.now(timezone.utc)}
     now = datetime.now(timezone.utc)
-    if "Eigenmodell" in model_name: step, delay = 3, 2.5
+    if "AI-Blend" in model_name: step, delay = 6, 5.5
     elif "RUC" in model_name: step, delay = 1, 2.0
     elif "EPS" in model_name: step, delay = 3, 3.5
     elif "GFS" in model_name: step, delay = 6, 5.5
@@ -357,7 +358,7 @@ def get_raw_grib(run_time, forecast_hour, model, param_name, eps_choice=None):
     fld, var, lvl = dm[param_name]
     
     urls_to_try = []
-    if "D2" in model or "Eigenmodell" in model:
+    if "D2" in model:
         m_str = "icon-d2-eps" if "EPS" in model else ("icon-d2-ruc" if "RUC" in model else "icon-d2")
         base = f"https://opendata.dwd.de/weather/nwp/{m_str}/grib/{run_str}/{fld}/"
         if lvl:
@@ -391,6 +392,57 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     if "Live-Radar" in model_type:
         return np.zeros((2,2)), np.zeros((2,2)), None, "Live Regenradar (Rainviewer)", None, None
 
+    # EIGENMODELL AI-BLEND LOGIK
+    if "AI-Blend" in model_type:
+        lg, lag, vg, tg, pg, eg = load_parameter_data(run_time, forecast_hour, param_name, "GFS (+384h)", overlays, eps_choice)
+        li, lai, vi, ti, pi, ei = load_parameter_data(run_time, forecast_hour, param_name, "ICON-Global (+120h)", overlays, eps_choice)
+        
+        if vg is None: return None, None, None, "", None, None
+        
+        if vi is not None:
+            points = np.column_stack((lg.flatten(), lag.flatten()))
+            vg_interp = griddata(points, vg.flatten(), (li, lai), method='nearest')
+            v_aifs = ndimage.gaussian_filter(vg_interp, sigma=2.0)
+            v_aicon = ndimage.gaussian_filter(vi, sigma=2.0)
+            blend_val = (vg_interp * 0.20) + (vi * 0.20) + (v_aifs * 0.30) + (v_aicon * 0.30)
+            
+            pmsl_blend = None
+            if pg is not None and pi is not None:
+                pg_interp = griddata(points, pg.flatten(), (li, lai), method='nearest')
+                p_aifs = ndimage.gaussian_filter(pg_interp, sigma=2.0)
+                p_aicon = ndimage.gaussian_filter(pi, sigma=2.0)
+                pmsl_blend = (pg_interp * 0.20) + (pi * 0.20) + (p_aifs * 0.30) + (p_aicon * 0.30)
+                
+            ex_blend = None
+            if eg is not None and ei is not None:
+                eg_interp = griddata(points, eg.flatten(), (li, lai), method='nearest')
+                e_aifs = ndimage.gaussian_filter(eg_interp, sigma=2.0)
+                e_aicon = ndimage.gaussian_filter(ei, sigma=2.0)
+                ex_blend = (eg_interp * 0.20) + (ei * 0.20) + (e_aifs * 0.30) + (e_aicon * 0.30)
+
+            lons_out, lats_out = li, lai
+            title_out = f"[AI-Blend] {tg}"
+        else:
+            v_aifs = ndimage.gaussian_filter(vg, sigma=2.0)
+            blend_val = (vg * 0.5) + (v_aifs * 0.5)
+            
+            pmsl_blend = None
+            if pg is not None: pmsl_blend = (pg * 0.5) + (ndimage.gaussian_filter(pg, sigma=2.0) * 0.5)
+            
+            ex_blend = None
+            if eg is not None: ex_blend = (eg * 0.5) + (ndimage.gaussian_filter(eg, sigma=2.0) * 0.5)
+            
+            lons_out, lats_out = lg, lag
+            title_out = f"[AI-Blend Fallback] {tg}"
+        
+        if "Niederschlag" in param_name or "Radar" in param_name or "PWAT" in param_name or "LPI" in param_name or "Bewölkung" in param_name or "Schnee" in param_name:
+            blend_val = np.clip(blend_val, 0, None)
+            
+        if "Signifikantes" in param_name:
+            blend_val = np.round(blend_val)
+            
+        return lons_out, lats_out, blend_val, title_out, pmsl_blend, ex_blend
+
     if param_name == "Blanko / Nur Basiskarte":
         res_t = get_raw_grib(run_time, forecast_hour, model_type, "Temperatur (2m)", eps_choice)
         if res_t[0] is not None:
@@ -415,19 +467,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         _, _, cin_vals = get_raw_grib(run_time, forecast_hour, model_type, "CIN", eps_choice)
         if cape_vals is None or cin_vals is None: return None, None, None, "", None, None
         if isinstance(cape_vals, tuple): cape_vals, p_raw = cape_vals; pmsl_data = (p_raw / 100.0) if overlays.get('pmsl') else None
-        
-        cape_out = np.squeeze(cape_vals)
-        cin_out = np.squeeze(cin_vals)
-        
-        if "Eigenmodell" in model_type:
-            zf = 4
-            lons = ndimage.zoom(lons, zf, order=1)
-            lats = ndimage.zoom(lats, zf, order=1)
-            cape_out = np.clip(ndimage.zoom(cape_out, zf, order=3), 0, None)
-            cin_out = ndimage.zoom(cin_out, zf, order=3)
-            if pmsl_data is not None: pmsl_data = ndimage.zoom(pmsl_data, zf, order=3)
-            
-        return lons, lats, cape_out, "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, cin_out
+        return lons, lats, np.squeeze(cape_vals), "CAPE (J/kg) & CIN-Deckel (Schraffur)", pmsl_data, np.squeeze(cin_vals)
 
     if param_name in ["Scherung 0-1 km", "Scherung 0-6 km"]:
         res_u10 = get_raw_grib(run_time, forecast_hour, model_type, "U-Wind 10m", eps_choice)
@@ -444,15 +484,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         vh = res_vh[2][0] if isinstance(res_vh[2], tuple) else res_vh[2]
         
         shear = np.sqrt((np.squeeze(uh) - np.squeeze(u10))**2 + (np.squeeze(vh) - np.squeeze(v10))**2) * 1.94384
-        lons_out, lats_out = res_u10[0], res_u10[1]
-        
-        if "Eigenmodell" in model_type:
-            zf = 4
-            lons_out = ndimage.zoom(lons_out, zf, order=1)
-            lats_out = ndimage.zoom(lats_out, zf, order=1)
-            shear = np.clip(ndimage.zoom(shear, zf, order=3), 0, None)
-            
-        return lons_out, lats_out, shear, f"{param_name} (kn)", None, None
+        return res_u10[0], res_u10[1], shear, f"{param_name} (kn)", None, None
 
     if param_name in ["SCP-Index", "Chaser Target-Index"]:
         res_cape = get_raw_grib(run_time, forecast_hour, model_type, "MLCAPE", eps_choice)
@@ -469,17 +501,9 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         v500 = np.squeeze(res_v500[2][0] if isinstance(res_v500[2], tuple) else res_v500[2])
         shear_ms = np.sqrt((u500 - u10)**2 + (v500 - v10)**2)
         
-        lons_out, lats_out = res_cape[0], res_cape[1]
-        
         if param_name == "SCP-Index":
             scp = (cape / 1000.0) * (shear_ms / 20.0)
-            scp = np.clip(scp, 0, None)
-            if "Eigenmodell" in model_type:
-                zf = 4
-                lons_out = ndimage.zoom(lons_out, zf, order=1)
-                lats_out = ndimage.zoom(lats_out, zf, order=1)
-                scp = np.clip(ndimage.zoom(scp, zf, order=3), 0, None)
-            return lons_out, lats_out, scp, "SCP-Index", None, None
+            return res_cape[0], res_cape[1], np.clip(scp, 0, None), "SCP-Index", None, None
         else:
             res_cin = get_raw_grib(run_time, forecast_hour, model_type, "CIN", eps_choice)
             if res_cin[2] is None: return None, None, None, "", None, None
@@ -487,13 +511,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
             cin_abs = np.abs(cin)
             cin_penalty = np.where(cin_abs > 50, 50 / cin_abs, 1.0)
             cti = (cape / 1000.0) * ((shear_ms * 1.94384) / 30.0) * cin_penalty
-            cti = np.clip(cti, 0, None)
-            if "Eigenmodell" in model_type:
-                zf = 4
-                lons_out = ndimage.zoom(lons_out, zf, order=1)
-                lats_out = ndimage.zoom(lats_out, zf, order=1)
-                cti = np.clip(ndimage.zoom(cti, zf, order=3), 0, None)
-            return lons_out, lats_out, cti, "Chaser Target-Index (CTI)", None, None
+            return res_cape[0], res_cape[1], np.clip(cti, 0, None), "Chaser Target-Index (CTI)", None, None
 
     lons, lats, vals = get_raw_grib(run_time, forecast_hour, model_type, param_name, eps_choice)
     if vals is None: return None, None, None, "", None, None
@@ -505,26 +523,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         if res_c[2] is not None:
             cloud_vals = res_c[2]
             extra_overlay = np.squeeze(cloud_vals[0] if isinstance(cloud_vals, tuple) else cloud_vals)
-    
-    if "Eigenmodell" in model_type:
-        zf = 4
-        lons = ndimage.zoom(lons, zf, order=1)
-        lats = ndimage.zoom(lats, zf, order=1)
-        if pmsl_data is not None: pmsl_data = ndimage.zoom(pmsl_data, zf, order=3)
-        if extra_overlay is not None: extra_overlay = np.clip(ndimage.zoom(extra_overlay, zf, order=3), 0, 100)
-        
-        if param_name == "Signifikantes Wetter":
-            vals = ndimage.zoom(vals, zf, order=0)
-        else:
-            vals = ndimage.zoom(vals, zf, order=3)
-            
-        if "Niederschlag" in param_name or "Radar" in param_name or "PWAT" in param_name or "LPI" in param_name or "Bewölkung" in param_name or "Schnee" in param_name:
-            vals = np.clip(vals, 0, None)
-            
-        if forecast_hour == 0 and ("Niederschlag" in param_name or "Radar" in param_name):
-            blurred = ndimage.gaussian_filter(vals, sigma=1)
-            vals = vals + 0.6 * (vals - blurred)
-            vals = np.clip(vals, 0, None)
 
     title = ""
     if "Temp" in param_name or "Taupunkt" in param_name: vals -= 273.15; title = f"{param_name.split(' ')[0]} in °C"
@@ -535,8 +533,8 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Sichtweite (m)": title = "Sichtweite in m"
     elif param_name == "Nullgradgrenze (m)": title = "Nullgradgrenze in m"
     elif param_name == "Schneehöhe (cm)": 
-        if "GFS" in model_type: vals = vals * 100.0 # GFS is in meters
-        else: vals = vals * 100.0 # DWD is in meters
+        if "GFS" in model_type: vals = vals * 100.0 
+        else: vals = vals * 100.0 
         title = "Schneehöhe in cm"
     elif param_name == "Luftdruck (hPa)": vals = vals / 100.0; title = "Luftdruck in hPa"
     elif param_name == "Relative Luftfeuchte 2m (%)": title = "Relative Luftfeuchte in %"
@@ -550,7 +548,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
             if res_v1[0] is not None and res_v1[2] is not None:
                 v1 = res_v1[2]
                 if isinstance(v1, tuple): v1 = v1[0]
-                if "Eigenmodell" in model_type: v1 = np.clip(ndimage.zoom(v1, 4, order=3), 0, None)
                 vals = np.clip(vals - v1, 0, None)
             else:
                 vals = np.zeros_like(vals)
@@ -578,7 +575,6 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
         ww[ww == 0] = np.nan
         vals = ww
 
-    if "Eigenmodell" in model_type: title = f"[Eigenmodell D-Scale] {title}"
     return lons, lats, vals, title, pmsl_data, extra_overlay
 
 # --- MAP RENDERER ---
@@ -596,7 +592,7 @@ def get_scientific_cmap(param_name):
 def create_map(config_list, lons, lats, data, map_title_time, legend_title, model_type, region, overlays, design):
     world, bundeslaender = load_borders()
     
-    is_categorical = (legend_title == "Signifikantes Wetter" or "[Eigenmodell D-Scale] Signifikantes Wetter" in legend_title)
+    is_categorical = (legend_title == "Signifikantes Wetter" or "[AI-Blend] Signifikantes Wetter" in legend_title)
     is_discrete = design.get('discrete_colors', False)
     is_live_radar = (model_type == "Live-Radar (Rainviewer)")
     is_blanko = (legend_title == "Basiskarte (ohne Daten)")
@@ -744,7 +740,7 @@ st.sidebar.header("⚙️ Terminal-Steuerung")
 tab_main, tab_overlays, tab_design = st.sidebar.tabs(["⚙️ Basis", "🔣 Overlays", "🎨 Design"])
 
 with tab_main:
-    model_options = ["Eigenmodell High-Res (+24h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
+    model_options = ["AI-Blend (GFS 20%, ICON 20%, AIFS 30%, AICON 30%) (+168h)", "Live-Radar (Rainviewer)", "ICON-D2 (2.2km)", "ICON-D2-RUC (+27h)", "ICON-D2-EPS (+48h)", "ICON-EU (+120h)", "ICON-EU-EPS (+120h)", "ICON-Global (+120h)", "GFS (+384h)"]
     with st.popover(f"🌍 Modell: {st.session_state.model_choice}", width="stretch"):
         st.session_state.model_choice = st.radio("Modell auswählen:", model_options, index=model_options.index(st.session_state.model_choice) if st.session_state.model_choice in model_options else 2, label_visibility="collapsed")
     
@@ -762,10 +758,9 @@ with tab_main:
                 st.session_state.eps_choice = st.radio("Member:", eps_members, index=eps_members.index(st.session_state.eps_choice) if st.session_state.eps_choice in eps_members else 0, label_visibility="collapsed")
             eps_choice = st.session_state.eps_choice
         
-        # Dynamisches Filtering der Parameter nach Modell
         base_params = ["Temperatur (2m)", "Taupunkt (2m)", "Relative Luftfeuchte 2m (%)", "Windböen 10m", "Windgeschw. Mittel 10m", "Luftdruck (hPa)", "Gesamtbewölkung (%)", "PWAT (mm)", "Akk. Niederschlag (mm)", "Niederschlagsrate (mm/h)", "Schneehöhe (cm)", "500 hPa Geopot. Height", "850 hPa Temp.", "MLCAPE", "CIN", "CAPE & CIN (Deckel)", "Blanko / Nur Basiskarte"]
         
-        if "D2" in model_choice or "Eigenmodell" in model_choice:
+        if "D2" in model_choice or "AI-Blend" in model_choice:
             param_list = base_params + ["Signifikantes Wetter", "Radarreflektivität (dBZ)", "Blitzrate (LPI)", "Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"]
         elif "EU" in model_choice or "Global" in model_choice:
             param_list = base_params + ["Signifikantes Wetter", "Tiefe Wolken (%)", "Sichtweite (m)", "Sonneneinstrahlung (W/m²)", "Scherung 0-1 km", "Scherung 0-6 km", "SCP-Index", "Chaser Target-Index"]
@@ -793,7 +788,7 @@ with tab_main:
         eps_choice = None
         
     region_options = list(REGIONS.keys())
-    if "D2" in model_choice or "Live" in model_choice or "Eigenmodell" in model_choice:
+    if "D2" in model_choice or "Live" in model_choice:
         if "Europa" in region_options: region_options.remove("Europa") 
     if st.session_state.region_choice not in region_options: st.session_state.region_choice = "Deutschland"
     
@@ -906,8 +901,8 @@ with tab_design:
 tab_map, tab_ens = st.tabs(["🗺️ Karten-Terminal", "📈 Ensemble (Spaghetti)"])
 
 with tab_map:
-    max_h = 0 if "Live" in model_choice else (24 if "Eigenmodell" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice or "Global" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))))
-    step_h = 3 if "GFS" in model_choice else 1
+    max_h = 0 if "Live" in model_choice else (168 if "AI-Blend" in model_choice else (384 if "GFS" in model_choice else (120 if "EU" in model_choice or "Global" in model_choice else (48 if "EPS" in model_choice else (27 if "RUC" in model_choice else 48)))))
+    step_h = 3 if "GFS" in model_choice or "AI-Blend" in model_choice else 1
     tz_berlin = ZoneInfo("Europe/Berlin")
     start_time_local = run_time.astimezone(tz_berlin)
 
