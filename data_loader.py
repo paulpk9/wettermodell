@@ -80,7 +80,7 @@ def get_available_runs(model_name):
     now = datetime.now(timezone.utc)
     if "AI-Blend" in model_name: step, delay = 6, 5.5
     elif "Eigenmodell" in model_name: step, delay = 3, 2.5
-    elif "RUC" in model_name: step, delay = 1, 2.0
+    elif "RUC" in model_name: step, delay = 1, 3.5 # FIX: RUC Delay auf 3.5h erhöht, damit der DWD Upload garantiert fertig ist
     elif "EPS" in model_name: step, delay = 3, 3.5
     elif "GFS" in model_name: step, delay = 6, 5.5
     elif "EU" in model_name: step, delay = 6, 3.5
@@ -341,8 +341,7 @@ def load_parameter_data(run_time, forecast_hour, param_name, model_type, overlay
     elif param_name == "Sichtweite (m)": title = "Sichtweite in m"
     elif param_name == "Nullgradgrenze (m)": title = "Nullgradgrenze in m"
     elif param_name == "Schneehöhe (cm)": 
-        if "GFS" in model_type: vals = vals * 100.0 
-        else: vals = vals * 100.0 
+        vals = vals * 100.0 
         title = "Schneehöhe in cm"
     elif param_name == "Luftdruck (hPa)": vals = vals / 100.0; title = "Luftdruck in hPa"
     elif param_name == "Relative Luftfeuchte 2m (%)": title = "Relative Luftfeuchte in %"
